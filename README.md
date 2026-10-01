@@ -86,8 +86,19 @@ those files are outside module-file rollback.
 
 ```sh
 make check
+make integration
+make integration-race
 make build
 ```
+
+Integration tests use real modules from a temporary file proxy. They cover API
+breaks and older-version fallback, test failures, new dependencies, shared-cache
+reuse, cache expiry and corruption, transient lookup failures, NDS routing,
+worker concurrency, replaced modules, interrupt rollback, and project locking.
+The concurrency timing test injects metadata query latency to measure the worker
+pool; it is not a benchmark of a production project. Optionally set
+`UPGRADE_GO_LEGACY_SCRIPT` to a backed-up shell script to test cache sharing in
+both directions against that implementation.
 
 `make install` backs up existing commands under `backups/<UTC timestamp>/` before
 installing. Set `UPGRADE_GO_INSTALL_DIR` to choose another executable directory.
