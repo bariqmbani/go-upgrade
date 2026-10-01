@@ -92,7 +92,7 @@ func (a *app) collectBatch() ([]request, error) {
 						results[i].failed++
 					}
 				}
-				a.ui.moduleDone()
+				a.ui.moduleDone(m.Path)
 			}
 		})
 	}
@@ -111,7 +111,7 @@ func (a *app) collectBatch() ([]request, error) {
 		}
 	}
 	a.ui.endProgress()
-	a.ui.status("OK", "Checked %s; selected %s (%s)", humanCount(len(pending), "module"), humanCount(len(batch), "upgrade"), humanDuration(time.Since(started)))
+	a.ui.status("OK", "Metadata %d/%d (100%%); selected %s (%s)", len(pending), len(pending), humanCount(len(batch), "upgrade"), humanDuration(time.Since(started)))
 	if excluded > 0 {
 		a.ui.text("  Skipped %s incompatible with Go %s or the module path\n", humanCount(excluded, "candidate"), a.opts.target)
 	}
@@ -171,6 +171,7 @@ func (a *app) tryUpgrade(requests []request) (bool, error) {
 		names[i] = r.String()
 	}
 	a.candidateContext = strings.Join(names, " ")
+	a.ui.candidates(names)
 	defer func() { a.candidateContext = "" }()
 	args = append(args, "go@"+a.opts.target, "toolchain@none")
 	err := a.runGo("updating candidate dependencies", args...)
@@ -179,6 +180,7 @@ func (a *app) tryUpgrade(requests []request) (bool, error) {
 	}
 	if err == nil {
 		a.step = "verifying candidate versions"
+		a.ui.task(a.step)
 		err = a.checkVersions(requests)
 	}
 	if err == nil {
@@ -203,7 +205,7 @@ func (a *app) tryUpgrade(requests []request) (bool, error) {
 
 func (a *app) fallback(r request) error {
 	previous := a.accepted.modules[r.module]
-	a.ui.beginMetadata(1, 1)
+	a.ui.task("finding earlier candidates")
 	defer a.ui.endProgress()
 	catalog := a.cache.catalog(a.lookupDirs[0], r.module)
 	a.reportCatalog(r.module, catalog)
@@ -222,7 +224,7 @@ func (a *app) fallback(r request) error {
 		}
 		a.ui.endProgress()
 		a.ui.text("  Trying earlier version %s...\n", candidate)
-		a.ui.beginTask("Validating earlier candidate")
+		a.ui.task("validating earlier candidate")
 		ok, err := a.tryUpgrade([]request{candidate})
 		a.ui.endProgress()
 		if err != nil {
@@ -236,7 +238,7 @@ func (a *app) fallback(r request) error {
 			return nil
 		}
 		a.ui.status("WARN", "Rejected %s; restored the last validated graph", candidate)
-		a.ui.beginMetadata(1, 1)
+		a.ui.task("finding earlier candidates")
 	}
 	a.ui.status("SKIP", "Retained %s@%s: no newer candidate passed validation", r.module, previous)
 	return nil
@@ -272,6 +274,8 @@ func (a *app) upgradeBatch(input []request) error {
 		previous := a.accepted.modules[r.module]
 		if a.accepted.required[r.module] && previous != "" && newer(r.version, previous) {
 			batch = append(batch, r)
+		} else {
+			a.ui.dependencyDone(r.module)
 		}
 	}
 	if len(batch) == 0 {
@@ -289,6 +293,7 @@ func (a *app) upgradeBatch(input []request) error {
 		requests := make([]string, len(batch))
 		for i, r := range batch {
 			requests[i] = r.String()
+			a.ui.dependencyDone(r.module)
 		}
 		a.ui.status("OK", "Accepted batch (%s)", humanCount(len(batch), "module"))
 		a.ui.detail("  Candidates: %s\n", strings.Join(requests, " "))
@@ -296,7 +301,11 @@ func (a *app) upgradeBatch(input []request) error {
 	}
 	a.ui.status("WARN", "Batch rejected; restored the last validated graph")
 	if len(batch) == 1 {
-		return a.fallback(batch[0])
+		if err := a.fallback(batch[0]); err != nil {
+			return err
+		}
+		a.ui.dependencyDone(batch[0].module)
+		return nil
 	}
 	split := batchSplit(batch)
 	a.ui.text("  Splitting into %d and %d modules\n", split, len(batch)-split)

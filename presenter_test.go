@@ -15,14 +15,14 @@ func TestPresenterRedirectedProgress(t *testing.T) {
 	p := newPresenter(&out, &errOut, false)
 	p.beginMetadata(8, 4)
 	p.lookup(lookupEvent{"metadata", "example.com/lib@v1.2.0", cacheShared})
-	p.moduleDone()
+	p.moduleDone("example.com/lib")
 	p.mu.Lock()
 	p.renderLocked(p.progress.started.Add(11 * time.Second))
 	p.mu.Unlock()
 	p.endProgress()
 	p.status("OK", "Checked %d modules", 8)
 	log := out.String()
-	if strings.ContainsAny(log, "\r\x1b") || !strings.Contains(log, "1/8 modules") || !strings.Contains(log, "[OK] Checked 8 modules") {
+	if strings.ContainsAny(log, "\r\x1b") || !strings.Contains(log, "Metadata 1/8 (12%)") || !strings.Contains(log, "[OK] Checked 8 modules") {
 		t.Fatalf("unexpected plain progress: %q", log)
 	}
 	if strings.Contains(log, "example.com/lib") {
@@ -33,7 +33,7 @@ func TestPresenterRedirectedProgress(t *testing.T) {
 func TestPresenterClearsBeforeDiagnosticsAndExit(t *testing.T) {
 	var combined bytes.Buffer
 	p := newPresenter(&combined, &combined, false)
-	p.terminalWidth = func() (int, bool) { return 100, true }
+	p.terminalSize = func() (int, int, bool) { return 100, 12, true }
 	p.beginMetadata(2, 2)
 	p.lookup(lookupEvent{"metadata", "example.com/lib@v1.2.0", cacheMiss})
 	p.mu.Lock()
@@ -45,7 +45,7 @@ func TestPresenterClearsBeforeDiagnosticsAndExit(t *testing.T) {
 	p.mu.Unlock()
 	p.close()
 	log := combined.String()
-	if !strings.Contains(log, "\r\x1b[2K[WARN] Lookup failed\nFIRST\nsecond\nthird\nfourth\nLAST\n") || !strings.HasSuffix(log, "\r\x1b[2K") {
+	if !strings.Contains(log, "[WARN] Lookup failed\nFIRST\nsecond\nthird\nfourth\nLAST\n") || p.footerHeight != 0 {
 		t.Fatalf("diagnostic or cleanup corrupted: %q", log)
 	}
 	if strings.Contains(log, "\x1b[?25") {
@@ -58,8 +58,9 @@ func TestProgressFitsWidthAndKeepsVersion(t *testing.T) {
 	s := progressState{title: "Checking metadata", metadata: true, completed: 3, total: 20, started: now,
 		item: "example.com/a/very/long/module/path/with/more/segments@v1.23.4", source: string(cacheShared)}
 	for _, width := range []int{79, 99, 119} {
-		line := progressLine(s, now.Add(3*time.Second), width)
-		if len([]rune(line)) > width || !strings.Contains(line, "@v1.23.4") || !strings.Contains(line, "3/20") || !strings.Contains(line, string(cacheShared)) {
+		lines := progressLines(s, 45, now.Add(3*time.Second), width)
+		line := lines[1]
+		if len([]rune(line)) > width || !strings.Contains(line, "@v1.23.4") || !strings.Contains(lines[0], "3/20 (15%)") || !strings.Contains(lines[0], "~45%") || len([]rune(lines[0])) > width || !strings.Contains(line, string(cacheShared)) {
 			t.Errorf("bad progress width %d: %q", width, line)
 		}
 	}
@@ -74,7 +75,7 @@ func TestTaskAfterFallbackResetsElapsedTime(t *testing.T) {
 	p.beginMetadata(1, 1)
 	p.endProgress()
 	p.task("validating the next batch")
-	line := progressLine(p.progress, time.Now().Add(time.Second), 100)
+	line := progressLines(p.progress, 45, time.Now().Add(time.Second), 100)[1]
 	if !strings.HasSuffix(line, " | 1s") {
 		t.Fatalf("stale task timer after metadata fallback: %q", line)
 	}
@@ -90,7 +91,7 @@ func TestPresenterConcurrentWorkers(t *testing.T) {
 		workers.Go(func() {
 			p.lookup(lookupEvent{"metadata", fmt.Sprintf("example.com/lib%d@v1.1.0", i), cacheShared})
 			p.diagnostic(fmt.Sprintf("worker %d", i), fmt.Sprintf("BEGIN-%d\nEND-%d\n", i, i))
-			p.moduleDone()
+			p.moduleDone(fmt.Sprintf("example.com/lib%d", i))
 		})
 	}
 	workers.Wait()

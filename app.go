@@ -35,15 +35,18 @@ type app struct {
 	lookupDirs         []string
 }
 
-func (a *app) phase(name, step string, fn func() error) error {
+func (a *app) phase(stage progressStage, name, step string, total int, fn func() error) error {
 	a.step = step
 	start := time.Now()
 	// Discovery owns its progress so empty passes produce no extra headings.
 	showPhase := name != "Dependency discovery"
 	if showPhase {
-		a.ui.beginTask(name)
+		a.ui.beginPhase(stage, name, total)
 	}
 	err := fn()
+	if err == nil && showPhase {
+		a.ui.phaseDone()
+	}
 	elapsed := time.Since(start)
 	a.ui.endProgress()
 	status := "OK"
@@ -51,7 +54,7 @@ func (a *app) phase(name, step string, fn func() error) error {
 		status = "FAIL"
 	}
 	if showPhase {
-		a.ui.status(status, "%s (%s)", name, humanDuration(elapsed))
+		a.ui.status(status, "%s %s (%s)", name, a.ui.phaseCounts(), humanDuration(elapsed))
 	}
 	for i := range a.timings {
 		if a.timings[i].name == name {
@@ -66,6 +69,7 @@ func (a *app) phase(name, step string, fn func() error) error {
 func (a *app) run() (result error) {
 	start := time.Now()
 	a.ui = newPresenter(a.out, a.errOut, a.opts.verbose)
+	a.ui.configure(a.opts.upgradeDeps)
 	a.ui.start()
 	defer a.ui.close()
 	a.step = "checking Go installation"
@@ -139,29 +143,38 @@ func (a *app) run() (result error) {
 		return err
 	}
 	defer os.RemoveAll(a.work)
-	if err = a.phase("Baseline checks", "baseline build", func() error {
+	if err = a.phase(stageBaseline, "Baseline checks", "baseline build", a.baselineUnits(), func() error {
 		if err := a.build("baseline build", false); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 		if !a.opts.skipTests {
-			return a.runGo("baseline tests", "test", "-count=1", "./...")
+			if err := a.runGo("baseline tests", "test", "-count=1", "./..."); err != nil {
+				return err
+			}
+			a.ui.checkDone()
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	if err = a.phase("Target setup", "setting target Go version", func() error {
+	if err = a.phase(stageTarget, "Target setup", "setting target Go version", a.targetUnits(), func() error {
 		if err := a.runGo("setting target Go version", "mod", "edit", "-go="+a.opts.target); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 		if err := a.tidy("initial module tidy"); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 		if a.opts.upgradeDeps {
 			if err := a.validate(); err != nil {
 				return err
 			}
-			return a.acceptGraph()
+			if err := a.acceptGraph(); err != nil {
+				return err
+			}
+			a.ui.checkDone()
 		}
 		return nil
 	}); err != nil {
@@ -170,7 +183,7 @@ func (a *app) run() (result error) {
 	if a.opts.upgradeDeps {
 		a.baseline = a.accepted.modules
 		a.examined = make(map[string]bool)
-		if err = a.phase("Dependency discovery", "initializing shared dependency cache", a.initializeCache); err != nil {
+		if err = a.phase(stageDiscovery, "Dependency discovery", "initializing shared dependency cache", 0, a.initializeCache); err != nil {
 			return err
 		}
 		if err = a.makeLookups(); err != nil {
@@ -178,7 +191,7 @@ func (a *app) run() (result error) {
 		}
 		for {
 			var batch []request
-			if err = a.phase("Dependency discovery", "discovering dependency upgrades", func() error {
+			if err = a.phase(stageDiscovery, "Dependency discovery", "discovering dependency upgrades", 0, func() error {
 				var err error
 				batch, err = a.collectBatch()
 				return err
@@ -188,14 +201,15 @@ func (a *app) run() (result error) {
 			if len(batch) == 0 {
 				break
 			}
-			if err = a.phase("Upgrade validation", "upgrading dependency batches", func() error { return a.upgradeBatch(batch) }); err != nil {
+			if err = a.phase(stageDependencies, "Upgrade validation", "upgrading dependency batches", len(batch), func() error { return a.upgradeBatch(batch) }); err != nil {
 				return err
 			}
 		}
 	}
-	if err = a.phase("Final validation", "verifying go.mod target", a.finalValidation); err != nil {
+	if err = a.phase(stageFinal, "Final validation", "verifying go.mod target", a.finalUnits(), a.finalValidation); err != nil {
 		return err
 	}
+	a.ui.success()
 	a.summary(time.Since(start))
 	return nil
 }
@@ -273,20 +287,56 @@ func (a *app) checkTarget() error {
 	return nil
 }
 
+func (a *app) baselineUnits() int {
+	if a.opts.skipTests {
+		return 1
+	}
+	return 2
+}
+
+func (a *app) validationUnits() int {
+	units := 1 // Build.
+	if !a.opts.skipTests {
+		units += 2 // Regular and race tests.
+	}
+	if !a.opts.skipVet {
+		units++
+	}
+	return units
+}
+
+func (a *app) targetUnits() int {
+	units := 2 // Edit and target-constrained tidy.
+	if a.opts.upgradeDeps {
+		units += a.validationUnits() + 1 // Validation and graph acceptance.
+	}
+	return units
+}
+
+func (a *app) finalUnits() int {
+	return a.validationUnits() + 3 // Initial/final target checks and module verification.
+}
+
 func (a *app) validate() error {
 	if err := a.build("intermediate build validation", true); err != nil {
 		return err
 	}
+	a.ui.checkDone()
 	if !a.opts.skipTests {
 		if err := a.runGo("intermediate tests", "test", "-count=1", "./..."); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 		if err := a.runGo("intermediate race tests", "test", "-race", "-count=1", "./..."); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 	}
 	if !a.opts.skipVet {
-		return a.runGo("intermediate vet", "vet", "./...")
+		if err := a.runGo("intermediate vet", "vet", "./..."); err != nil {
+			return err
+		}
+		a.ui.checkDone()
 	}
 	return nil
 }
@@ -295,28 +345,38 @@ func (a *app) finalValidation() error {
 	if err := a.checkTarget(); err != nil {
 		return err
 	}
+	a.ui.checkDone()
 	if err := a.runGo("verifying modules", "mod", "verify"); err != nil {
 		return err
 	}
+	a.ui.checkDone()
 	if !a.opts.skipTests {
 		if err := a.runGo("final tests", "test", "-count=1", "./..."); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 		if err := a.runGo("final race tests", "test", "-race", "-count=1", "./..."); err != nil {
 			return err
 		}
+		a.ui.checkDone()
 	}
 	if !a.opts.skipVet {
 		if err := a.runGo("final vet", "vet", "./..."); err != nil {
 			a.ui.diagnostic("Vet checks source and test compilation even with --skip-tests.", "")
 			return err
 		}
+		a.ui.checkDone()
 	}
 	if err := a.build("final build validation", false); err != nil {
 		return err
 	}
+	a.ui.checkDone()
 	a.step = "final go.mod validation"
-	return a.checkTarget()
+	if err := a.checkTarget(); err != nil {
+		return err
+	}
+	a.ui.checkDone()
+	return nil
 }
 
 func (a *app) summary(elapsed time.Duration) {
@@ -328,7 +388,7 @@ func (a *app) summary(elapsed time.Duration) {
 		vet = "Skipped"
 	}
 	a.ui.text("\n")
-	a.ui.status("OK", "Upgrade complete (%s)", humanDuration(elapsed))
+	a.ui.status("OK", "Upgrade complete: 100%% (%s)", humanDuration(elapsed))
 	a.ui.text("  go.mod: %s | Build: Passed | Tests: %s | Vet: %s\n", a.opts.target, tests, vet)
 	if a.cache != nil {
 		a.ui.text("  Cache reuse: %d version lists, %d metadata checks\n", a.cache.versionHits.Load(), a.cache.metadataHits.Load())
