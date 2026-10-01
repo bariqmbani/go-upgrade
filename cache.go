@@ -20,11 +20,16 @@ import (
 type cacheSource string
 
 const (
-	cacheMiss    cacheSource = "miss (queried Go)"
-	cacheShared  cacheSource = "hit (shared)"
-	cacheMemory  cacheSource = "hit (this run)"
-	cacheRefresh cacheSource = "bypassed (--refresh-cache; queried Go)"
+	cacheMiss    cacheSource = "Checking"
+	cacheShared  cacheSource = "Cached (shared)"
+	cacheMemory  cacheSource = "Cached (this run)"
+	cacheRefresh cacheSource = "Refreshing"
 )
+
+type lookupEvent struct {
+	kind, item string
+	source     cacheSource
+}
 
 type catalog struct {
 	latest     string

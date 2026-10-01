@@ -9,11 +9,11 @@ func TestOptionsCompatibility(t *testing.T) {
 	getenv := func(key string) string {
 		return map[string]string{"HOME": "/home/test", "UPGRADE_GO_CACHE_TTL": "00060", "UPGRADE_GO_WORKERS": "8"}[key]
 	}
-	o, help, err := parseOptions([]string{"--skip-tests", "go1.25", "--upgrade-deps", "--refresh-cache", "--skip-vet"}, getenv)
+	o, help, err := parseOptions([]string{"--skip-tests", "go1.25", "--upgrade-deps", "--refresh-cache", "--skip-vet", "--verbose"}, getenv)
 	if err != nil || help {
 		t.Fatalf("parse: %v, help=%t", err, help)
 	}
-	if o.target != "1.25.0" || !o.skipTests || !o.skipVet || !o.upgradeDeps || !o.refreshCache {
+	if o.target != "1.25.0" || !o.skipTests || !o.skipVet || !o.upgradeDeps || !o.refreshCache || !o.verbose {
 		t.Fatalf("legacy flags lost: %+v", o)
 	}
 	if o.cacheRoot != "/home/test/.cache/upgrade-go" || o.cacheTTL != time.Minute || o.workers != 8 {

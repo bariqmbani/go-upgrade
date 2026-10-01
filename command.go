@@ -22,6 +22,24 @@ type commandError struct {
 func (e *commandError) Error() string { return fmt.Sprintf("%s: %v", e.command, e.err) }
 func (e *commandError) Unwrap() error { return e.err }
 
+func errorCode(err error) int {
+	var command *commandError
+	if errors.As(err, &command) {
+		return command.code
+	}
+	return 1
+}
+
+func commandName(bin string, args ...string) string {
+	parts := append([]string{bin}, args...)
+	for i, part := range parts {
+		if strings.ContainsAny(part, " \t\n'\";$`\\") {
+			parts[i] = "'" + strings.ReplaceAll(part, "'", "'\\''") + "'"
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 type runner struct {
 	ctx   context.Context
 	goBin string

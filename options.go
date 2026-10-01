@@ -18,6 +18,7 @@ type options struct {
 	cacheTTL                  time.Duration
 	cacheRoot, checkCommand   string
 	buildCommand              string
+	verbose                   bool
 }
 
 var goNumber = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
@@ -60,6 +61,8 @@ func parseOptions(args []string, getenv func(string) string) (options, bool, err
 			o.upgradeDeps = true
 		case "--refresh-cache":
 			o.refreshCache = true
+		case "--verbose":
+			o.verbose = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return o, false, fmt.Errorf("unknown option: %s", arg)
@@ -108,13 +111,14 @@ func parseOptions(args []string, getenv func(string) string) (options, bool, err
 func usage(w io.Writer, name string) {
 	fmt.Fprintf(w, `Usage:
   %s <go-version> [--skip-tests] [--skip-vet] [--upgrade-deps] [--refresh-cache]
-      [--build-command="command"]
+      [--build-command="command"] [--verbose]
 
 Options:
   --skip-tests       Skip go test and race test (vet still checks tests)
   --skip-vet         Skip go vet; build validation still runs
   --upgrade-deps     Upgrade dependencies; disabled by default
   --refresh-cache    Refresh shared version lists and compatibility metadata
+  --verbose          Show each candidate, cache source, and successful command output
   --build-command    Build command for baseline, candidates, and final validation
                      (default: go build ./...); runs via /bin/sh -c
   -h, --help         Show this help
