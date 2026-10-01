@@ -124,6 +124,7 @@ func (p *presenter) clearLocked() {
 }
 
 func (p *presenter) releaseFooterLocked() {
+	p.resizeLocked()
 	p.clearLocked()
 	p.footerHeight = 0
 }
@@ -254,6 +255,7 @@ func (p *presenter) configure(upgradeDeps bool) {
 func (p *presenter) beginPhase(stage progressStage, title string, total int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.resizeLocked()
 	p.clearLocked()
 	p.work.begin(stage, total)
 	p.progress = progressState{}
@@ -331,6 +333,7 @@ func (p *presenter) success() {
 func (p *presenter) beginMetadata(total, workers int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.resizeLocked()
 	p.clearLocked()
 	p.work.begin(stageDiscovery, total)
 	p.progress = progressState{}
@@ -396,6 +399,7 @@ func (p *presenter) moduleDone(module string) {
 func (p *presenter) endProgress() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.resizeLocked()
 	p.clearLocked()
 	p.progress = progressState{}
 }

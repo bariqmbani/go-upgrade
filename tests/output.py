@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -14,9 +15,9 @@ import time
 from fixtures import Fixture, SCRIPT, metadata_queries, version_queries
 
 
-def terminal_run(f, project, flags=(), extra=None, width=100, interrupt=None, resize=False):
+def terminal_run(f, project, flags=(), extra=None, width=100, height=24, interrupt=None, resize=False):
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, width, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
     env = f.environment(project, {"TERM": "xterm-256color", "CI": "", "NO_COLOR": "1", **(extra or {})})
     proc = subprocess.Popen([SCRIPT, "1.25.3", "--skip-tests", "--skip-vet", "--upgrade-deps", *flags],
                             cwd=project, env=env, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
@@ -55,7 +56,7 @@ def terminal_run(f, project, flags=(), extra=None, width=100, interrupt=None, re
                     proc.send_signal(interrupt)
                     sent_signal = True
                 if resize:
-                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 72, 0, 0))
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 72, 0, 0))
                     changed_size = True
         proc.wait(timeout=10)
         return proc.returncode, output.decode(errors="replace"), saw_live_candidate, changed_size, sent_signal
@@ -77,6 +78,8 @@ with Fixture() as f:
     assert "SUCCESS-MARKER\n" not in output.split("Baseline checks...")[1], output
     assert "\x1b" not in output and "\r" not in output, repr(output)
     assert "Upgrade complete" in output and "selected 1 upgrade" in output, output
+    assert "Baseline checks 1/1 (100%)" in output and "Final validation 4/4 (100%)" in output, output
+    assert "Metadata 1/1 (100%)" in output and "Upgrade complete: 100%" in output, output
     print("PASS concise redirected output without terminal controls or successful command logs", flush=True)
 
     p = f.project("verbose-cache", [library])
@@ -128,16 +131,34 @@ with Fixture() as f:
         "UPGRADE_GO_CACHE_DIR": str(f.root / "live-cache"),
     }, resize=True)
     assert code == 0 and live and resized, (code, repr(output))
+    assert re.search(r"\x1b\[23;1HOverall \[[#-]+\] ~\d+% \| Metadata 0/1 \(0%\)", output), repr(output)
+    assert "\x1b[24;1H" in output and "\x1b[22;1H\x1b[2K" in output, repr(output)
+    assert "\x1b[15;1HOverall" in output and "\x1b[16;1H" in output, repr(output)
+    estimates = [int(n) for n in re.findall(r"Overall \[[#-]+\] ~(\d+)%", output)]
+    assert estimates and estimates == sorted(estimates) and max(estimates) <= 99, estimates
     assert "\x1b[2K" in output and "\x1b[?25" not in output and "\x1b[32m" not in output, repr(output)
     assert "Upgrade complete" in output and output.endswith("\n"), repr(output)
-    print("PASS live progress before query completion, resize, NO_COLOR, and clean terminal completion", flush=True)
+    print("PASS fixed bottom footer, blank margin, percentages, live checks, resize, and clean completion", flush=True)
 
     # Real terminals still use plain output for CI, TERM=dumb, or tiny widths.
-    for label, extra, width in (("ci", {"CI": "true"}, 100), ("dumb", {"TERM": "dumb"}, 100), ("narrow", {}, 40)):
+    for label, extra, width, height in (("ci", {"CI": "true"}, 100, 24), ("dumb", {"TERM": "dumb"}, 100, 24), ("narrow", {}, 40, 24), ("short", {}, 100, 7)):
         p = f.project("terminal-" + label, [library])
-        code, output, _, _, _ = terminal_run(f, p, extra=extra, width=width)
+        code, output, _, _, _ = terminal_run(f, p, extra=extra, width=width, height=height)
         assert code == 0 and "\x1b" not in output, (code, repr(output))
     print("PASS plain terminal fallbacks for CI, dumb terminals, and narrow widths", flush=True)
+
+    # Both stdout and stderr go to the same real terminal. Long diagnostics must
+    # remain complete while the presenter clears and removes its footer.
+    p = f.project("terminal-long-error", [library])
+    originals = [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
+    command = "sleep 0.3; printf 'TERMINAL-FIRST\\n'; seq 1 128; printf 'TERMINAL-LAST\\n' >&2; exit 7"
+    code, output, _, _, _ = terminal_run(f, p, flags=["--build-command", command])
+    assert code == 7 and "\x1b[23;1HOverall" in output, (code, repr(output))
+    expected = "TERMINAL-FIRST\n" + "".join(f"{n}\n" for n in range(1, 129)) + "TERMINAL-LAST\n"
+    assert expected in output.replace("\r\n", "\n"), repr(output)
+    assert "Upgrade complete: 100%" not in output and "Go upgrade failed" in output, repr(output)
+    assert originals == [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
+    print("PASS complete long stderr/stdout diagnostics with footer cleanup and rollback", flush=True)
 
     for sig, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
         p = f.project("terminal-interrupt-" + str(expected), [library])

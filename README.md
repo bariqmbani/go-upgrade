@@ -69,16 +69,34 @@ tidy even without `--upgrade-deps`.
 ## Output
 
 The default output shows configuration, phase results, dependency changes, cache
-reuse, and timings. Successful build and test output is quiet. During metadata
-discovery, supported terminals show one updating line:
+reuse, and timings. Successful build and test output is quiet. Supported terminals
+show a two-line footer pinned to the bottom, with one blank row above it:
 
 ```text
-Checking metadata 12/48 | example.com/module@v1.8.0 | Cached (shared) | 4s
+
+Overall [####------] ~45% | Metadata 12/48 (25%)
+example.com/module@v1.8.0 | Cached (shared) | 4s
 ```
 
-The line shows completed modules, the most recent lookup, its cache source, and
-elapsed time. Long module paths are shortened to fit the terminal. Progress
-refreshes at most ten times per second and clears before permanent messages.
+The first line shows the overall progress bar and current phase's completed/total
+count and percentage. The second shows an active dependency or check, its cache
+source when relevant, and phase elapsed time. Logs remain above the footer and in
+normal terminal scrollback. Long module paths and the bar adapt to terminal size.
+Progress refreshes at most ten times per second and clears before diagnostics.
+
+`~` marks the overall percentage as an estimate of completed work, not remaining
+time. Enabled stages have equal weight: baseline, target setup, dependency
+discovery, dependency validation, and final validation. Without `--upgrade-deps`,
+only baseline, target setup, and final validation contribute. Overall progress
+never moves backward when new dependencies or retries add work, stays below 100%
+until final validation succeeds, and reports 100% in the success summary.
+
+Metadata counts are exact for the current discovery pass; cache hits count too.
+Additional discovery passes are numbered. Dependency validation counts each
+dependency once when accepted, retained after fallback, or resolved by another
+upgrade. Failed attempts do not advance that count. Other phases count completed
+enabled checks. During a running build or test, its count stays steady while
+elapsed time updates.
 
 Use `--verbose` for individual candidate results and successful command transcripts:
 
@@ -91,10 +109,11 @@ batches before fallback. Command failures include the command, exit code, and
 full output; candidate failures also identify the dependencies being validated.
 Diagnostics go to stderr. Successful phase results and summaries go to stdout.
 
-Redirected output, CI, `TERM=dumb`, terminals with unknown size, and very narrow
-terminals use plain progress summaries without animation. Long steps report
-progress every ten seconds. `NO_COLOR` disables status colors while retaining
-terminal progress. For detailed plain logs, capture both streams:
+Redirected output, CI, `TERM=dumb`, unknown dimensions, and terminals smaller than
+60 columns or 8 rows use plain count/percentage summaries without animation. Long
+steps report progress every ten seconds. `NO_COLOR` disables status colors while
+retaining terminal progress. The footer is removed on success, failure, or
+interruption. For detailed plain logs, capture both streams:
 
 ```sh
 go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --verbose > upgrade.log 2>&1
@@ -154,6 +173,12 @@ Atomic cache publication supports concurrent independent projects. Lookup
 failures are not persisted as incompatibility. An unwritable shared cache falls
 back to in-memory storage. Cached metadata never skips a project's own builds.
 
+The shared cache stores version catalogs and declared Go/module-path compatibility.
+It does not store project-specific accepted versions or rejected build outcomes.
+A second run in the same repository can reuse metadata and still retry the same
+fallback builds. `--verbose` shows whether each metadata lookup was cached;
+those cache labels do not imply reuse of project validation results.
+
 Version-list lookups and candidate metadata checks report cache usage in the
 live status line and in verbose logs:
 
@@ -187,8 +212,9 @@ Integration tests use real modules from a temporary file proxy. They cover API
 breaks and older-version fallback, test failures, new dependencies, shared-cache
 reuse, cache expiry and corruption, transient lookup failures, custom build commands,
 worker concurrency, replaced modules, interrupt rollback, and project locking.
-Presentation tests use pipes and real pseudo terminals to check live progress,
-resizing, terminal fallbacks, full error output, and interrupt cleanup.
+Presentation tests use screen models, pipes, and real pseudo terminals to check
+footer placement, the blank margin, percentages, log preservation, resizing,
+terminal fallbacks, full error output, and interrupt cleanup.
 The concurrency timing test injects metadata query latency to measure the worker
 pool; it is not a benchmark of a production project. Optionally set
 `UPGRADE_GO_LEGACY_SCRIPT` to a backed-up shell script to test cache sharing in
