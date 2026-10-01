@@ -57,6 +57,7 @@ The installed local Go must be at least the requested target. Every subprocess u
 | `--skip-vet` | Skip vet, while keeping build validation |
 | `--upgrade-deps` | Enable dependency upgrades; off by default |
 | `--refresh-cache` | Refresh version catalogs and dependency metadata |
+| `--verbose` | Show each candidate, cache source, and successful command output |
 | `--build-command="command"` | Customize builds; default: `go build ./...` |
 | `-h`, `--help` | Show usage |
 
@@ -65,11 +66,46 @@ Tidy uses `go mod tidy -go=<target>`. Major module-path migrations and updates
 to replaced modules are not automatic. Dependency versions can change during
 tidy even without `--upgrade-deps`.
 
+## Output
+
+The default output shows configuration, phase results, dependency changes, cache
+reuse, and timings. Successful build and test output is quiet. During metadata
+discovery, supported terminals show one updating line:
+
+```text
+Checking metadata 12/48 | example.com/module@v1.8.0 | Cached (shared) | 4s
+```
+
+The line shows completed modules, the most recent lookup, its cache source, and
+elapsed time. Long module paths are shortened to fit the terminal. Progress
+refreshes at most ten times per second and clears before permanent messages.
+
+Use `--verbose` for individual candidate results and successful command transcripts:
+
+```sh
+go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --verbose
+```
+
+Errors **always include complete diagnostics**, including failed candidates or
+batches before fallback. Command failures include the command, exit code, and
+full output; candidate failures also identify the dependencies being validated.
+Diagnostics go to stderr. Successful phase results and summaries go to stdout.
+
+Redirected output, CI, `TERM=dumb`, terminals with unknown size, and very narrow
+terminals use plain progress summaries without animation. Long steps report
+progress every ten seconds. `NO_COLOR` disables status colors while retaining
+terminal progress. For detailed plain logs, capture both streams:
+
+```sh
+go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --verbose > upgrade.log 2>&1
+```
+
 ## Performance and compatibility
 
 Metadata discovery uses four concurrent workers by default, each in a separate
 temporary module. Set `UPGRADE_GO_WORKERS=1` for sequential discovery or a value
-up to 64 for greater concurrency. Output and upgrade order are deterministic.
+up to 64 for greater concurrency. Dependency selection and upgrade order are
+deterministic; live progress and verbose messages follow worker activity.
 
 Module changes and builds stay sequential. Compatible candidates are attempted
 in batches. A failing batch is split, and a failing individual dependency falls
@@ -118,17 +154,20 @@ Atomic cache publication supports concurrent independent projects. Lookup
 failures are not persisted as incompatibility. An unwritable shared cache falls
 back to in-memory storage. Cached metadata never skips a project's own builds.
 
-Version-list lookups and candidate metadata checks report cache usage:
+Version-list lookups and candidate metadata checks report cache usage in the
+live status line and in verbose logs:
 
 ```text
-    Version list example.com/lib: cache hit (shared)
-    Checking candidate example.com/lib@v1.2.0: metadata cache hit (shared)
+  Version list example.com/lib: Cached (shared)
+  Candidate example.com/lib@v1.2.0: Cached (shared)
+  Compatible: example.com/lib@v1.2.0 (Cached (shared))
 ```
 
-`hit (this run)` means an in-memory result was reused. `miss (queried Go)` means
-the command performed a fresh lookup, which may still use Go's own module cache.
-`--refresh-cache` reports `bypassed (--refresh-cache; queried Go)`. Candidate
-checks report the same information when falling back to older versions.
+`Cached (this run)` means an in-memory result was reused. `Checking` means the
+command is querying Go, which may still use Go's own module cache. Version queries
+appear as `Finding versions` in the live line. `Refreshing` means `--refresh-cache`
+bypassed the shared cache. Candidate checks report the same information when
+falling back to older versions. Cache decisions are reported before a query starts.
 
 ## Recovery and development
 
@@ -148,6 +187,8 @@ Integration tests use real modules from a temporary file proxy. They cover API
 breaks and older-version fallback, test failures, new dependencies, shared-cache
 reuse, cache expiry and corruption, transient lookup failures, custom build commands,
 worker concurrency, replaced modules, interrupt rollback, and project locking.
+Presentation tests use pipes and real pseudo terminals to check live progress,
+resizing, terminal fallbacks, full error output, and interrupt cleanup.
 The concurrency timing test injects metadata query latency to measure the worker
 pool; it is not a benchmark of a production project. Optionally set
 `UPGRADE_GO_LEGACY_SCRIPT` to a backed-up shell script to test cache sharing in

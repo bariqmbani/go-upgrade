@@ -32,9 +32,22 @@ if query and timeline:
 if query: time.sleep(float(os.environ.get('QUERY_DELAY', '0')))
 if metadata and os.environ.get('FAIL_METADATA') == 'true':
     print('temporary metadata lookup failure', file=sys.stderr)
+    if os.environ.get('LONG_DIAGNOSTICS'):
+        print('METADATA-FIRST', file=sys.stderr)
+        for i in range(8): print('metadata detail', i, file=sys.stderr)
+        print('METADATA-LAST', file=sys.stderr)
     status = 1
 elif versions and os.environ.get('FAIL_VERSIONS') == 'true':
     print('temporary version lookup failure', file=sys.stderr)
+    if os.environ.get('LONG_DIAGNOSTICS'):
+        print('VERSIONS-FIRST', file=sys.stderr)
+        for i in range(8): print('version detail', i, file=sys.stderr)
+        print('VERSIONS-LAST', file=sys.stderr)
+    status = 1
+elif args[:4] == ['list','-m','-f','{{.Version}}'] and os.environ.get('FAIL_LATEST') == 'true':
+    print('LATEST-FIRST', file=sys.stderr)
+    for i in range(8): print('latest detail', i, file=sys.stderr)
+    print('LATEST-LAST', file=sys.stderr)
     status = 1
 else:
     status = subprocess.run([os.environ['REAL_GO'], *args]).returncode
