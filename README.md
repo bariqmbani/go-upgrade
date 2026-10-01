@@ -118,6 +118,18 @@ Atomic cache publication supports concurrent independent projects. Lookup
 failures are not persisted as incompatibility. An unwritable shared cache falls
 back to in-memory storage. Cached metadata never skips a project's own builds.
 
+Version-list lookups and candidate metadata checks report cache usage:
+
+```text
+    Version list example.com/lib: cache hit (shared)
+    Checking candidate example.com/lib@v1.2.0: metadata cache hit (shared)
+```
+
+`hit (this run)` means an in-memory result was reused. `miss (queried Go)` means
+the command performed a fresh lookup, which may still use Go's own module cache.
+`--refresh-cache` reports `bypassed (--refresh-cache; queried Go)`. Candidate
+checks report the same information when falling back to older versions.
+
 ## Recovery and development
 
 Failed or interrupted runs restore the original `go.mod` and `go.sum`, including

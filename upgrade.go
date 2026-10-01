@@ -74,6 +74,7 @@ func (a *app) collectBatch() ([]request, error) {
 				m := pending[i]
 				catalog := a.cache.catalog(dir, m.Path)
 				var log strings.Builder
+				fmt.Fprintf(&log, "    Version list %s: cache %s\n", m.Path, catalog.source)
 				log.WriteString(catalog.log)
 				for _, v := range catalog.candidates {
 					if a.ctx.Err() != nil {
@@ -83,6 +84,7 @@ func (a *app) collectBatch() ([]request, error) {
 						continue
 					}
 					metadata := a.cache.supports(dir, m.Path, v)
+					fmt.Fprintf(&log, "    Checking candidate %s@%s: metadata cache %s\n", m.Path, v, metadata.source)
 					if metadata.status == 0 {
 						results[i].request = request{m.Path, v}
 						log.WriteString(metadata.log)
@@ -182,6 +184,7 @@ func (a *app) tryUpgrade(requests []request) (bool, string, error) {
 func (a *app) fallback(r request) error {
 	previous := a.accepted.modules[r.module]
 	catalog := a.cache.catalog(a.lookupDirs[0], r.module)
+	fmt.Fprintf(a.out, "    Version list %s: cache %s\n", r.module, catalog.source)
 	for _, v := range catalog.candidates {
 		if !newer(r.version, v) || !newer(v, previous) || (strings.Contains(v, "-") && v != catalog.latest) {
 			continue
@@ -189,7 +192,10 @@ func (a *app) fallback(r request) error {
 		if err := a.ctx.Err(); err != nil {
 			return err
 		}
-		if a.cache.supports(a.lookupDirs[0], r.module, v).status != 0 {
+		metadata := a.cache.supports(a.lookupDirs[0], r.module, v)
+		fmt.Fprintf(a.out, "    Checking candidate %s@%s: metadata cache %s\n", r.module, v, metadata.source)
+		if metadata.status != 0 {
+			fmt.Fprint(a.out, tail(metadata.log, 2))
 			continue
 		}
 		candidate := request{r.module, v}

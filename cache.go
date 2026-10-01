@@ -17,16 +17,27 @@ import (
 	"golang.org/x/mod/semver"
 )
 
+type cacheSource string
+
+const (
+	cacheMiss    cacheSource = "miss (queried Go)"
+	cacheShared  cacheSource = "hit (shared)"
+	cacheMemory  cacheSource = "hit (this run)"
+	cacheRefresh cacheSource = "bypassed (--refresh-cache; queried Go)"
+)
+
 type catalog struct {
 	latest     string
 	candidates []string
 	log        string
+	source     cacheSource
 }
 
 type metadata struct {
 	// 0: compatible metadata, 1: intrinsic incompatibility, 2: transient lookup failure.
 	status int
 	log    string
+	source cacheSource
 }
 
 type dependencyCache struct {
@@ -115,6 +126,7 @@ func (c *dependencyCache) catalog(dir, module string) catalog {
 	entry, exists := c.versions[module]
 	c.mu.Unlock()
 	if exists {
+		entry.source = cacheMemory
 		return entry
 	}
 	path := filepath.Join(c.shared, "versions", hash(module))
@@ -122,12 +134,17 @@ func (c *dependencyCache) catalog(dir, module string) catalog {
 		if data, err := os.ReadFile(path); err == nil {
 			entry, exists = decodeCatalog(data, c.ttl, time.Now())
 			if exists {
+				entry.source = cacheShared
 				c.versionHits.Add(1)
 			}
 		}
 	}
 	if !exists {
 		entry = c.fetchCatalog(dir, module, path)
+		entry.source = cacheMiss
+		if c.refresh {
+			entry.source = cacheRefresh
+		}
 	}
 	c.mu.Lock()
 	c.versions[module] = entry
@@ -178,6 +195,7 @@ func (c *dependencyCache) supports(dir, module, version string) metadata {
 	entry, exists := c.metadata[key]
 	c.mu.Unlock()
 	if exists {
+		entry.source = cacheMemory
 		return entry
 	}
 	path := filepath.Join(c.shared, "metadata", hash(key))
@@ -185,12 +203,17 @@ func (c *dependencyCache) supports(dir, module, version string) metadata {
 		if data, err := os.ReadFile(path); err == nil {
 			entry, exists = decodeMetadata(data)
 			if exists {
+				entry.source = cacheShared
 				c.metadataHits.Add(1)
 			}
 		}
 	}
 	if !exists {
 		entry = c.fetchMetadata(dir, module, version)
+		entry.source = cacheMiss
+		if c.refresh {
+			entry.source = cacheRefresh
+		}
 		if c.shared != "" && entry.status != 2 {
 			data := fmt.Sprintf("%d\n%s", entry.status, entry.log)
 			if err := atomicWrite(path, []byte(data), 0o644); err != nil {
