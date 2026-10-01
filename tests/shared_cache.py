@@ -26,7 +26,7 @@ with Fixture() as fixture:
     second=project('project-b',libs)
     output,calls=run(second)
     assert not version_queries(calls) and not metadata_queries(calls), calls
-    assert 'Cache hits    : 4 version lists, 4 metadata checks' in output, output
+    assert 'Cache reuse: 4 version lists, 4 metadata checks' in output, output
     assert len([a for a in calls if a[0]=='get'])==1
     print('PASS project A -> B: zero repeated version/metadata queries, one upgrade batch',flush=True)
 

@@ -30,6 +30,10 @@ func errorCode(err error) int {
 	return 1
 }
 
+func lookupError(err error) string {
+	return fmt.Sprintf("Error: %v\nExit code: %d", err, errorCode(err))
+}
+
 func commandName(bin string, args ...string) string {
 	parts := append([]string{bin}, args...)
 	for i, part := range parts {
@@ -80,14 +84,14 @@ func (r *runner) run(dir string, stdout, stderr io.Writer, bin string, args ...s
 	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		if r.ctx.Err() != nil {
-			return r.ctx.Err()
+			return &commandError{command: commandName(bin, args...), code: 1, err: r.ctx.Err()}
 		}
 		code := 1
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() > 0 {
 			code = exit.ExitCode()
 		}
-		return &commandError{command: strings.Join(append([]string{bin}, args...), " "), code: code, err: err}
+		return &commandError{command: commandName(bin, args...), code: code, err: err}
 	}
 	return nil
 }
@@ -99,5 +103,8 @@ func (r *runner) goRun(dir string, output io.Writer, args ...string) error {
 func (r *runner) query(dir string, args ...string) (string, string, error) {
 	var out, log bytes.Buffer
 	err := r.run(dir, &out, &log, r.goBin, args...)
+	if err != nil {
+		return strings.TrimRight(out.String(), "\n"), out.String() + log.String(), err
+	}
 	return strings.TrimRight(out.String(), "\n"), log.String(), err
 }

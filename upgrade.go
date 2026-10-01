@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
 type request struct {
@@ -50,10 +47,11 @@ func (a *app) collectBatch() ([]request, error) {
 		return nil, nil
 	}
 	workers := min(a.opts.workers, len(pending))
-	fmt.Fprintf(a.out, "==> Selecting newest candidates compatible with Go %s...\n    Checking %d modules with %d metadata workers.\n", a.opts.target, len(pending), workers)
+	a.ui.beginMetadata(len(pending), workers)
+	defer a.ui.endProgress()
 	type discovery struct {
-		request request
-		log     string
+		request          request
+		excluded, failed int
 	}
 	results := make([]discovery, len(pending))
 	jobs := make(chan int, len(pending))
@@ -62,20 +60,16 @@ func (a *app) collectBatch() ([]request, error) {
 	}
 	close(jobs)
 	var wg sync.WaitGroup
-	var finished atomic.Int64
 	for worker := 0; worker < workers; worker++ {
-		wg.Add(1)
-		go func(dir string) {
-			defer wg.Done()
+		wg.Go(func() {
+			dir := a.lookupDirs[worker]
 			for i := range jobs {
 				if a.ctx.Err() != nil {
 					return
 				}
 				m := pending[i]
 				catalog := a.cache.catalog(dir, m.Path)
-				var log strings.Builder
-				fmt.Fprintf(&log, "    Version list %s: cache %s\n", m.Path, catalog.source)
-				log.WriteString(catalog.log)
+				a.reportCatalog(m.Path, catalog)
 				for _, v := range catalog.candidates {
 					if a.ctx.Err() != nil {
 						return
@@ -83,50 +77,65 @@ func (a *app) collectBatch() ([]request, error) {
 					if !newer(v, m.Version) || (strings.Contains(v, "-") && v != catalog.latest) {
 						continue
 					}
-					metadata := a.cache.supports(dir, m.Path, v)
-					fmt.Fprintf(&log, "    Checking candidate %s@%s: metadata cache %s\n", m.Path, v, metadata.source)
-					if metadata.status == 0 {
+					entry := a.cache.supports(dir, m.Path, v)
+					a.reportMetadata(request{m.Path, v}, entry)
+					if entry.status == 0 {
 						results[i].request = request{m.Path, v}
-						log.WriteString(metadata.log)
 						break
 					}
-					if metadata.status == 1 {
-						fmt.Fprintf(&log, "    Skipping %s@%s: incompatible module metadata.\n", m.Path, v)
+					if entry.status == 1 {
+						results[i].excluded++
 					} else {
-						fmt.Fprintf(&log, "    Skipping %s@%s: metadata lookup failed.\n", m.Path, v)
+						results[i].failed++
 					}
-					log.WriteString(tail(metadata.log, 2))
 				}
-				results[i].log = log.String()
-				finished.Add(1)
+				a.ui.moduleDone()
 			}
-		}(a.lookupDirs[worker])
+		})
 	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	waiting := true
-	for waiting {
-		select {
-		case <-done:
-			waiting = false
-		case <-ticker.C:
-			fmt.Fprintf(a.out, "    Metadata progress: %d/%d modules checked.\n", finished.Load(), len(pending))
-		}
-	}
+	wg.Wait()
 	if err := a.ctx.Err(); err != nil {
 		return nil, err
 	}
 	var batch []request
-	// Keep log and upgrade order deterministic regardless of worker completion order.
+	excluded, failed := 0, 0
+	// Progress follows execution; upgrade order remains deterministic.
 	for _, result := range results {
-		fmt.Fprint(a.out, result.log)
+		excluded += result.excluded
+		failed += result.failed
 		if result.request.module != "" {
 			batch = append(batch, result.request)
 		}
 	}
+	a.ui.endProgress()
+	a.ui.text("  Checked %d modules; selected %d upgrades\n", len(pending), len(batch))
+	if excluded > 0 {
+		a.ui.text("  Skipped %d candidates incompatible with Go %s or the module path\n", excluded, a.opts.target)
+	}
+	if failed > 0 {
+		a.ui.status("WARN", "%d candidate metadata lookups failed; see diagnostics", failed)
+	}
 	return batch, nil
+}
+
+func (a *app) reportCatalog(module string, entry catalog) {
+	if entry.log != "" {
+		a.ui.diagnostic("Version lookup or cache warning: "+module, entry.log)
+	}
+}
+
+func (a *app) reportMetadata(candidate request, entry metadata) {
+	if entry.warning != "" {
+		a.ui.diagnostic("Metadata cache warning: "+candidate.String(), entry.warning)
+	}
+	switch entry.status {
+	case 0:
+		a.ui.detail("  Compatible: %s (%s)\n", candidate, entry.source)
+	case 1:
+		a.ui.detail("  Skipped: %s (%s)\n    %s\n", candidate, entry.source, strings.TrimSpace(entry.log))
+	default:
+		a.ui.diagnostic("Metadata lookup failed: "+candidate.String()+" ("+string(entry.source)+")", entry.log)
+	}
 }
 
 func (a *app) checkVersions(requests []request) error {
@@ -151,40 +160,46 @@ func (a *app) checkVersions(requests []request) error {
 	return nil
 }
 
-func (a *app) tryUpgrade(requests []request) (bool, string, error) {
-	var log bytes.Buffer
+func (a *app) tryUpgrade(requests []request) (bool, error) {
 	args := []string{"get"}
-	for _, r := range requests {
+	names := make([]string, len(requests))
+	for i, r := range requests {
 		args = append(args, r.String())
+		names[i] = r.String()
 	}
+	a.candidateContext = strings.Join(names, " ")
+	defer func() { a.candidateContext = "" }()
 	args = append(args, "go@"+a.opts.target, "toolchain@none")
-	err := a.runner.goRun(a.dir, &log, args...)
+	err := a.runGo("updating candidate dependencies", args...)
 	if err == nil {
-		err = a.tidy(&log)
+		err = a.tidy("candidate module tidy")
 	}
 	if err == nil {
+		a.step = "verifying candidate versions"
 		err = a.checkVersions(requests)
 	}
 	if err == nil {
-		err = a.validate(&log)
+		err = a.validate()
 	}
 	if err == nil {
-		return true, log.String(), nil
+		return true, nil
 	}
-	fmt.Fprintln(&log, err)
+	a.ui.diagnostic("Candidate validation failed", fmt.Sprintf("  Candidates: %s\n  Step: %s\n  Error: %v\n", a.candidateContext, a.step, err))
 	if restoreErr := a.accepted.restore(a.dir); restoreErr != nil {
-		return false, log.String(), fmt.Errorf("restoring last validated graph: %w", restoreErr)
+		return false, fmt.Errorf("restoring last validated graph: %w", restoreErr)
 	}
 	if a.ctx.Err() != nil {
-		return false, log.String(), a.ctx.Err()
+		return false, a.ctx.Err()
 	}
-	return false, log.String(), nil
+	return false, nil
 }
 
 func (a *app) fallback(r request) error {
 	previous := a.accepted.modules[r.module]
+	a.ui.beginMetadata(1, 1)
+	defer a.ui.endProgress()
 	catalog := a.cache.catalog(a.lookupDirs[0], r.module)
-	fmt.Fprintf(a.out, "    Version list %s: cache %s\n", r.module, catalog.source)
+	a.reportCatalog(r.module, catalog)
 	for _, v := range catalog.candidates {
 		if !newer(r.version, v) || !newer(v, previous) || (strings.Contains(v, "-") && v != catalog.latest) {
 			continue
@@ -192,15 +207,17 @@ func (a *app) fallback(r request) error {
 		if err := a.ctx.Err(); err != nil {
 			return err
 		}
-		metadata := a.cache.supports(a.lookupDirs[0], r.module, v)
-		fmt.Fprintf(a.out, "    Checking candidate %s@%s: metadata cache %s\n", r.module, v, metadata.source)
-		if metadata.status != 0 {
-			fmt.Fprint(a.out, tail(metadata.log, 2))
+		candidate := request{r.module, v}
+		entry := a.cache.supports(a.lookupDirs[0], r.module, v)
+		a.reportMetadata(candidate, entry)
+		if entry.status != 0 {
 			continue
 		}
-		candidate := request{r.module, v}
-		fmt.Fprintf(a.out, "==> Trying earlier version %s...\n", candidate)
-		ok, log, err := a.tryUpgrade([]request{candidate})
+		a.ui.endProgress()
+		a.ui.text("  Trying earlier version %s...\n", candidate)
+		a.ui.beginTask("Validating earlier candidate")
+		ok, err := a.tryUpgrade([]request{candidate})
+		a.ui.endProgress()
 		if err != nil {
 			return err
 		}
@@ -208,12 +225,13 @@ func (a *app) fallback(r request) error {
 			if err := a.acceptGraph(); err != nil {
 				return err
 			}
-			fmt.Fprintf(a.out, "    Accepted %s\n", candidate)
+			a.ui.status("OK", "Accepted %s", candidate)
 			return nil
 		}
-		fmt.Fprintf(a.out, "    Rejected %s; restored the last validated graph.\n%s", candidate, tail(log, 3))
+		a.ui.status("WARN", "Rejected %s; restored the last validated graph", candidate)
+		a.ui.beginMetadata(1, 1)
 	}
-	fmt.Fprintf(a.out, "    Retained %s@%s: no newer candidate passed validation.\n", r.module, previous)
+	a.ui.status("SKIP", "Retained %s@%s: no newer candidate passed validation", r.module, previous)
 	return nil
 }
 
@@ -252,8 +270,8 @@ func (a *app) upgradeBatch(input []request) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	fmt.Fprintf(a.out, "==> Trying dependency batch (%d modules)...\n", len(batch))
-	ok, log, err := a.tryUpgrade(batch)
+	a.ui.text("  Validating dependency batch (%d modules)...\n", len(batch))
+	ok, err := a.tryUpgrade(batch)
 	if err != nil {
 		return err
 	}
@@ -265,15 +283,16 @@ func (a *app) upgradeBatch(input []request) error {
 		for i, r := range batch {
 			requests[i] = r.String()
 		}
-		fmt.Fprintf(a.out, "    Accepted batch: %s\n", strings.Join(requests, " "))
+		a.ui.status("OK", "Accepted batch (%d modules)", len(batch))
+		a.ui.detail("  Candidates: %s\n", strings.Join(requests, " "))
 		return nil
 	}
-	fmt.Fprintf(a.out, "    Batch failed; restored the last validated graph.\n%s", tail(log, 3))
+	a.ui.status("WARN", "Batch rejected; restored the last validated graph")
 	if len(batch) == 1 {
 		return a.fallback(batch[0])
 	}
 	split := batchSplit(batch)
-	fmt.Fprintf(a.out, "    Splitting into %d and %d modules.\n", split, len(batch)-split)
+	a.ui.text("  Splitting into %d and %d modules\n", split, len(batch)-split)
 	if err := a.upgradeBatch(batch[:split]); err != nil {
 		return err
 	}

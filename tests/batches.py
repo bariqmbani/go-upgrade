@@ -36,7 +36,7 @@ with Fixture() as fixture:
     output, calls = run(all_good)
     gets = [a for a in calls if a[0]=='get']
     assert len(gets)==1 and len([a for a in gets[0] if '@v' in a])==8, gets
-    assert 'Accepted batch:' in output
+    assert 'Accepted batch (' in output
     print('PASS all-compatible upgrades in one batch', flush=True)
 
     # A transitive upgrade from the first sibling makes the second unnecessary.

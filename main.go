@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -41,17 +40,11 @@ func main() {
 	}()
 	a := &app{opts: opts, ctx: ctx, out: os.Stdout, errOut: os.Stderr}
 	if err := a.run(); err != nil {
-		code := 1
-		var command *commandError
-		if errors.As(err, &command) {
-			code = command.code
-		}
+		code := errorCode(err)
 		if n := signalCode.Load(); n != 0 {
 			code = int(n)
 		}
-		fmt.Fprintln(os.Stderr, "\n========================================\nERROR\n========================================")
-		fmt.Fprintf(os.Stderr, "Step      : %s\nError     : %v\nExit code : %d\n", a.step, err, code)
-		fmt.Fprintln(os.Stderr, "========================================")
+		a.ui.fatal(a.step, err, code)
 		os.Exit(code)
 	}
 }

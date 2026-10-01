@@ -106,9 +106,8 @@ type listedModule struct {
 }
 
 func (a *app) listModules() ([]listedModule, error) {
-	out, log, err := a.runner.query(a.dir, "list", "-m", "-json", "all")
+	out, err := a.queryGo("list", "-m", "-json", "all")
 	if err != nil {
-		fmt.Fprint(a.errOut, log)
 		return nil, err
 	}
 	decoder := json.NewDecoder(strings.NewReader(out))

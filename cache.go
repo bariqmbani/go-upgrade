@@ -40,9 +40,10 @@ type catalog struct {
 
 type metadata struct {
 	// 0: compatible metadata, 1: intrinsic incompatibility, 2: transient lookup failure.
-	status int
-	log    string
-	source cacheSource
+	status  int
+	log     string
+	source  cacheSource
+	warning string
 }
 
 type dependencyCache struct {
@@ -54,14 +55,14 @@ type dependencyCache struct {
 	versions                  map[string]catalog
 	metadata                  map[string]metadata
 	versionHits, metadataHits atomic.Int64
+	observe                   func(lookupEvent)
 }
 
 func hash(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }
 
 func (a *app) initializeCache() error {
-	config, log, err := a.runner.query(a.dir, "env", "-json", "GOPROXY", "GOPRIVATE", "GONOPROXY", "GONOSUMDB", "GOSUMDB", "GOINSECURE", "GOAUTH", "GOFLAGS")
+	config, err := a.queryGo("env", "-json", "GOPROXY", "GOPRIVATE", "GONOPROXY", "GONOSUMDB", "GOSUMDB", "GOINSECURE", "GOAUTH", "GOFLAGS")
 	if err != nil {
-		fmt.Fprint(a.errOut, log)
 		return err
 	}
 	root, err := filepath.Abs(a.opts.cacheRoot)
@@ -80,17 +81,24 @@ func (a *app) initializeCache() error {
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(a.errOut, "Warning: shared cache unavailable; using the per-run cache.")
+		a.ui.diagnostic("Shared cache unavailable; using the per-run cache.", err.Error())
 		shared = ""
 	} else {
-		fmt.Fprintf(a.out, "    Shared cache: %s (version lists expire after %.0fs)\n", root, a.opts.cacheTTL.Seconds())
+		a.ui.detail("  Shared cache: %s (version lists expire after %s)\n", root, humanDuration(a.opts.cacheTTL))
 	}
 	a.cache = &dependencyCache{
 		runner: a.runner, target: a.opts.target, shared: shared,
 		refresh: a.opts.refreshCache, ttl: a.opts.cacheTTL,
 		versions: make(map[string]catalog), metadata: make(map[string]metadata),
+		observe: a.ui.lookup,
 	}
 	return nil
+}
+
+func (c *dependencyCache) notify(kind, item string, source cacheSource) {
+	if c.observe != nil {
+		c.observe(lookupEvent{kind: kind, item: item, source: source})
+	}
 }
 
 func decodeCatalog(data []byte, ttl time.Duration, now time.Time) (catalog, bool) {
@@ -132,6 +140,7 @@ func (c *dependencyCache) catalog(dir, module string) catalog {
 	c.mu.Unlock()
 	if exists {
 		entry.source = cacheMemory
+		c.notify("versions", module, cacheMemory)
 		return entry
 	}
 	path := filepath.Join(c.shared, "versions", hash(module))
@@ -145,11 +154,15 @@ func (c *dependencyCache) catalog(dir, module string) catalog {
 		}
 	}
 	if !exists {
-		entry = c.fetchCatalog(dir, module, path)
-		entry.source = cacheMiss
+		source := cacheMiss
 		if c.refresh {
-			entry.source = cacheRefresh
+			source = cacheRefresh
 		}
+		c.notify("versions", module, source)
+		entry = c.fetchCatalog(dir, module, path)
+		entry.source = source
+	} else {
+		c.notify("versions", module, entry.source)
 	}
 	c.mu.Lock()
 	c.versions[module] = entry
@@ -160,13 +173,13 @@ func (c *dependencyCache) catalog(dir, module string) catalog {
 func (c *dependencyCache) fetchCatalog(dir, module, path string) catalog {
 	out, log, err := c.runner.query(dir, "list", "-m", "-versions", "-f", "{{range .Versions}}{{println .}}{{end}}", module)
 	if err != nil {
-		return catalog{log: fmt.Sprintf("    Version lookup failed for %s; retaining its current version.\n%s", module, log)}
+		return catalog{log: fmt.Sprintf("Version lookup failed for %s; retaining its current version.\n%s\n%s\n", module, log, lookupError(err))}
 	}
 	entry := catalog{}
 	versions := strings.Fields(out)
 	latest, log, latestErr := c.runner.query(dir, "list", "-m", "-f", "{{.Version}}", module+"@latest")
 	if latestErr != nil {
-		entry.log = fmt.Sprintf("    Latest-version lookup failed for %s; checking listed releases.\n%s", module, log)
+		entry.log = fmt.Sprintf("Latest-version lookup failed for %s; checking listed releases.\n%s\n%s\n", module, log, lookupError(latestErr))
 	} else if semver.IsValid(latest) {
 		entry.latest = latest
 		versions = append(versions, latest)
@@ -188,7 +201,7 @@ func (c *dependencyCache) fetchCatalog(dir, module, path string) catalog {
 			data += v + "\n"
 		}
 		if err := atomicWrite(path, []byte(data), 0o644); err != nil {
-			entry.log += fmt.Sprintf("Warning: could not save shared versions for %s.\n", module)
+			entry.log += fmt.Sprintf("Could not save shared versions for %s: %v\n", module, err)
 		}
 	}
 	return entry
@@ -201,6 +214,7 @@ func (c *dependencyCache) supports(dir, module, version string) metadata {
 	c.mu.Unlock()
 	if exists {
 		entry.source = cacheMemory
+		c.notify("metadata", key, cacheMemory)
 		return entry
 	}
 	path := filepath.Join(c.shared, "metadata", hash(key))
@@ -214,17 +228,21 @@ func (c *dependencyCache) supports(dir, module, version string) metadata {
 		}
 	}
 	if !exists {
-		entry = c.fetchMetadata(dir, module, version)
-		entry.source = cacheMiss
+		source := cacheMiss
 		if c.refresh {
-			entry.source = cacheRefresh
+			source = cacheRefresh
 		}
+		c.notify("metadata", key, source)
+		entry = c.fetchMetadata(dir, module, version)
+		entry.source = source
 		if c.shared != "" && entry.status != 2 {
 			data := fmt.Sprintf("%d\n%s", entry.status, entry.log)
 			if err := atomicWrite(path, []byte(data), 0o644); err != nil {
-				entry.log += fmt.Sprintf("Warning: could not save shared metadata for %s.\n", key)
+				entry.warning = fmt.Sprintf("Could not save shared metadata for %s: %v\n", key, err)
 			}
 		}
+	} else {
+		c.notify("metadata", key, entry.source)
 	}
 	c.mu.Lock()
 	c.metadata[key] = entry
@@ -235,7 +253,7 @@ func (c *dependencyCache) supports(dir, module, version string) metadata {
 func (c *dependencyCache) fetchMetadata(dir, module, version string) metadata {
 	path, log, err := c.runner.query(dir, "list", "-m", "-f", "{{.GoMod}}", module+"@"+version)
 	if err != nil {
-		return metadata{status: 2, log: log + err.Error() + "\n"}
+		return metadata{status: 2, log: log + lookupError(err) + "\n"}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

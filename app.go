@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	goversion "go/version"
 	"io"
@@ -21,9 +22,11 @@ type app struct {
 	opts               options
 	ctx                context.Context
 	out, errOut        io.Writer
+	ui                 *presenter
 	runner             *runner
 	dir, work, localGo string
 	step               string
+	candidateContext   string
 	cache              *dependencyCache
 	original, accepted graph
 	baseline           map[string]string
@@ -35,19 +38,30 @@ type app struct {
 func (a *app) phase(name, step string, fn func() error) error {
 	a.step = step
 	start := time.Now()
+	a.ui.beginTask(name)
 	err := fn()
+	elapsed := time.Since(start)
+	a.ui.endProgress()
+	status := "OK"
+	if err != nil {
+		status = "FAIL"
+	}
+	a.ui.status(status, "%s (%s)", name, humanDuration(elapsed))
 	for i := range a.timings {
 		if a.timings[i].name == name {
-			a.timings[i].time += time.Since(start)
+			a.timings[i].time += elapsed
 			return err
 		}
 	}
-	a.timings = append(a.timings, timing{name, time.Since(start)})
+	a.timings = append(a.timings, timing{name, elapsed})
 	return err
 }
 
 func (a *app) run() (result error) {
 	start := time.Now()
+	a.ui = newPresenter(a.out, a.errOut, a.opts.verbose)
+	a.ui.start()
+	defer a.ui.close()
 	a.step = "checking Go installation"
 	var err error
 	a.runner, err = newRunner(a.ctx)
@@ -59,16 +73,28 @@ func (a *app) run() (result error) {
 		return err
 	}
 	a.step = "reading local Go version"
-	local, log, err := a.runner.query(a.dir, "env", "GOVERSION")
+	local, err := a.queryGo("env", "GOVERSION")
 	if err != nil {
-		fmt.Fprint(a.errOut, log)
 		return err
 	}
 	a.localGo = normalizeGo(local)
-	fmt.Fprintln(a.out, "========================================\nGo project upgrade\n========================================")
-	fmt.Fprintf(a.out, "Local Go     : %s\nTarget Go    : %s\nToolchain    : local\nSkip tests   : %t\nSkip vet     : %t\nUpgrade deps : %t\n\n", a.localGo, a.opts.target, a.opts.skipTests, a.opts.skipVet, a.opts.upgradeDeps)
-	if a.opts.buildCommand != "" {
-		fmt.Fprintf(a.out, "Build command: %s\n\n", a.opts.buildCommand)
+	tests, vet, deps := "Enabled", "Enabled", "Disabled"
+	if a.opts.skipTests {
+		tests = "Skipped"
+	}
+	if a.opts.skipVet {
+		vet = "Skipped"
+	}
+	if a.opts.upgradeDeps {
+		deps = "Enabled"
+	}
+	build := a.opts.buildCommand
+	if build == "" {
+		build = "go build ./..."
+	}
+	a.ui.text("Go project upgrade\n\n  Go:            %s installed -> %s target\n  Toolchain:     Local\n  Dependencies:  %s\n  Tests:         %s\n  Vet:           %s\n  Build command: %s\n", a.localGo, a.opts.target, deps, tests, vet, build)
+	if a.opts.checkCommand != "" {
+		a.ui.text("  Intermediate:  %s\n", a.opts.checkCommand)
 	}
 	a.step = "validating local Go version"
 	if !goversion.IsValid("go" + a.localGo) {
@@ -94,10 +120,11 @@ func (a *app) run() (result error) {
 	}
 	defer func() {
 		if result != nil {
+			a.ui.endProgress()
 			if restoreErr := a.original.restore(a.dir); restoreErr != nil {
 				result = fmt.Errorf("%w; restoring original module files failed: %v", result, restoreErr)
 			} else {
-				fmt.Fprintln(a.errOut, "Restored original go.mod and go.sum.")
+				a.ui.diagnostic("Restored original go.mod and go.sum.", "")
 			}
 		}
 	}()
@@ -106,34 +133,28 @@ func (a *app) run() (result error) {
 		return err
 	}
 	defer os.RemoveAll(a.work)
-	if err = a.phase("Baseline", "baseline build", func() error {
-		fmt.Fprintf(a.out, "==> Running baseline build with local Go %s...\n", a.localGo)
-		if err := a.build(a.out, false); err != nil {
+	if err = a.phase("Baseline checks", "baseline build", func() error {
+		if err := a.build("baseline build", false); err != nil {
 			return err
 		}
 		if !a.opts.skipTests {
-			a.step = "baseline tests"
-			fmt.Fprintln(a.out, "==> Running baseline tests...")
-			return a.runner.goRun(a.dir, a.out, "test", "-count=1", "./...")
+			return a.runGo("baseline tests", "test", "-count=1", "./...")
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	if err = a.phase("Target setup", "setting target Go version", func() error {
-		fmt.Fprintf(a.out, "\n==> Setting go.mod target to Go %s...\n", a.opts.target)
-		if err := a.runner.goRun(a.dir, a.out, "mod", "edit", "-go="+a.opts.target); err != nil {
+		if err := a.runGo("setting target Go version", "mod", "edit", "-go="+a.opts.target); err != nil {
 			return err
 		}
-		a.step = "initial module tidy"
-		fmt.Fprintln(a.out, "==> Tidying module...")
-		return a.tidy(a.out)
+		return a.tidy("initial module tidy")
 	}); err != nil {
 		return err
 	}
 	if a.opts.upgradeDeps {
 		if err = a.phase("Target setup", "validating target baseline", func() error {
-			if err := a.validate(a.out); err != nil {
+			if err := a.validate(); err != nil {
 				return err
 			}
 			return a.acceptGraph()
@@ -142,7 +163,7 @@ func (a *app) run() (result error) {
 		}
 		a.baseline = a.accepted.modules
 		a.examined = make(map[string]bool)
-		if err = a.phase("Discovery", "initializing shared dependency cache", a.initializeCache); err != nil {
+		if err = a.phase("Dependency discovery", "initializing shared dependency cache", a.initializeCache); err != nil {
 			return err
 		}
 		if err = a.makeLookups(); err != nil {
@@ -150,7 +171,7 @@ func (a *app) run() (result error) {
 		}
 		for {
 			var batch []request
-			if err = a.phase("Discovery", "discovering dependency upgrades", func() error {
+			if err = a.phase("Dependency discovery", "discovering dependency upgrades", func() error {
 				var err error
 				batch, err = a.collectBatch()
 				return err
@@ -172,18 +193,56 @@ func (a *app) run() (result error) {
 	return nil
 }
 
-func (a *app) build(output io.Writer, intermediate bool) error {
-	if intermediate && a.opts.checkCommand != "" {
-		return a.runner.run(a.dir, output, output, "/bin/sh", "-c", a.opts.checkCommand)
+// Spool command output to disk instead of keeping potentially large build logs
+// in memory. Successful output is quiet by default; failures are always replayed
+// in full before graph rollback or fallback.
+func (a *app) runCommand(step, bin string, args ...string) error {
+	a.step = step
+	a.ui.task(step)
+	log, err := os.CreateTemp(a.work, "command-*.log")
+	if err != nil {
+		return fmt.Errorf("capture output for %s: %w", step, err)
 	}
-	if a.opts.buildCommand != "" {
-		return a.runner.run(a.dir, output, output, "/bin/sh", "-c", a.opts.buildCommand)
+	defer os.Remove(log.Name())
+	defer log.Close()
+	err = a.runner.run(a.dir, log, log, bin, args...)
+	if _, seekErr := log.Seek(0, io.SeekStart); seekErr != nil {
+		return errors.Join(err, fmt.Errorf("read command output: %w", seekErr))
 	}
-	return a.runner.goRun(a.dir, output, "build", "./...")
+	label := step
+	if a.candidateContext != "" {
+		label += "\n  Candidates: " + a.candidateContext
+	}
+	outputErr := a.ui.commandOutput(label, commandName(bin, args...), log, err)
+	return errors.Join(err, outputErr)
 }
 
-func (a *app) tidy(output io.Writer) error {
-	if err := a.runner.goRun(a.dir, output, "mod", "tidy", "-go="+a.opts.target); err != nil {
+func (a *app) runGo(step string, args ...string) error {
+	return a.runCommand(step, a.runner.goBin, args...)
+}
+
+func (a *app) queryGo(args ...string) (string, error) {
+	out, log, err := a.runner.query(a.dir, args...)
+	if err != nil {
+		outputErr := a.ui.commandOutput(a.step, commandName(a.runner.goBin, args...), strings.NewReader(log), err)
+		return out, errors.Join(err, outputErr)
+	}
+	a.ui.detail("%s", log)
+	return out, nil
+}
+
+func (a *app) build(step string, intermediate bool) error {
+	if intermediate && a.opts.checkCommand != "" {
+		return a.runCommand(step, "/bin/sh", "-c", a.opts.checkCommand)
+	}
+	if a.opts.buildCommand != "" {
+		return a.runCommand(step, "/bin/sh", "-c", a.opts.buildCommand)
+	}
+	return a.runGo(step, "build", "./...")
+}
+
+func (a *app) tidy(step string) error {
+	if err := a.runGo(step, "mod", "tidy", "-go="+a.opts.target); err != nil {
 		return err
 	}
 	return a.checkTarget()
@@ -204,20 +263,20 @@ func (a *app) checkTarget() error {
 	return nil
 }
 
-func (a *app) validate(output io.Writer) error {
-	if err := a.build(output, true); err != nil {
+func (a *app) validate() error {
+	if err := a.build("intermediate build validation", true); err != nil {
 		return err
 	}
 	if !a.opts.skipTests {
-		if err := a.runner.goRun(a.dir, output, "test", "-count=1", "./..."); err != nil {
+		if err := a.runGo("intermediate tests", "test", "-count=1", "./..."); err != nil {
 			return err
 		}
-		if err := a.runner.goRun(a.dir, output, "test", "-race", "-count=1", "./..."); err != nil {
+		if err := a.runGo("intermediate race tests", "test", "-race", "-count=1", "./..."); err != nil {
 			return err
 		}
 	}
 	if !a.opts.skipVet {
-		return a.runner.goRun(a.dir, output, "vet", "./...")
+		return a.runGo("intermediate vet", "vet", "./...")
 	}
 	return nil
 }
@@ -226,39 +285,24 @@ func (a *app) finalValidation() error {
 	if err := a.checkTarget(); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "\n==> Verifying go.mod Go version...\n    go.mod: go %s\n", a.opts.target)
-	a.step = "verifying modules"
-	fmt.Fprintln(a.out, "==> Verifying modules...")
-	if err := a.runner.goRun(a.dir, a.out, "mod", "verify"); err != nil {
+	if err := a.runGo("verifying modules", "mod", "verify"); err != nil {
 		return err
 	}
 	if !a.opts.skipTests {
-		a.step = "running tests with local Go"
-		fmt.Fprintf(a.out, "==> Running tests with Go %s...\n", a.localGo)
-		if err := a.runner.goRun(a.dir, a.out, "test", "-count=1", "./..."); err != nil {
+		if err := a.runGo("final tests", "test", "-count=1", "./..."); err != nil {
 			return err
 		}
-		a.step = "running race tests with local Go"
-		fmt.Fprintf(a.out, "==> Running race tests with Go %s...\n", a.localGo)
-		if err := a.runner.goRun(a.dir, a.out, "test", "-race", "-count=1", "./..."); err != nil {
+		if err := a.runGo("final race tests", "test", "-race", "-count=1", "./..."); err != nil {
 			return err
 		}
-	} else {
-		fmt.Fprintln(a.out, "==> Tests skipped.")
 	}
 	if !a.opts.skipVet {
-		a.step = "running go vet with local Go"
-		fmt.Fprintf(a.out, "==> Running go vet with Go %s...\n", a.localGo)
-		if err := a.runner.goRun(a.dir, a.out, "vet", "./..."); err != nil {
-			fmt.Fprintln(a.errOut, "Vet checks source and test compilation even with --skip-tests.")
+		if err := a.runGo("final vet", "vet", "./..."); err != nil {
+			a.ui.diagnostic("Vet checks source and test compilation even with --skip-tests.", "")
 			return err
 		}
-	} else {
-		fmt.Fprintln(a.out, "==> Vet skipped (--skip-vet).")
 	}
-	a.step = "final build validation with local Go"
-	fmt.Fprintf(a.out, "==> Performing final build with Go %s...\n", a.localGo)
-	if err := a.build(a.out, false); err != nil {
+	if err := a.build("final build validation", false); err != nil {
 		return err
 	}
 	a.step = "final go.mod validation"
@@ -266,25 +310,25 @@ func (a *app) finalValidation() error {
 }
 
 func (a *app) summary(elapsed time.Duration) {
-	tests, vet := "yes", "passed"
+	tests, vet := "Passed", "Passed"
 	if a.opts.skipTests {
-		tests = "no"
+		tests = "Skipped"
 	}
 	if a.opts.skipVet {
-		vet = "skipped"
+		vet = "Skipped"
 	}
-	fmt.Fprintln(a.out, "\n========================================\nSUCCESS\n========================================")
-	fmt.Fprintf(a.out, "Local Go      : %s\nTarget Go     : %s\nFinal go.mod  : go %s\nToolchain     : local\nUpgrade deps  : %t\nTests run     : %s\nVet           : %s\nBuild         : passed\n", a.localGo, a.opts.target, a.opts.target, a.opts.upgradeDeps, tests, vet)
+	a.ui.text("\n")
+	a.ui.status("OK", "Upgrade complete (%s)", humanDuration(elapsed))
+	a.ui.text("  go.mod: %s | Build: Passed | Tests: %s | Vet: %s\n", a.opts.target, tests, vet)
 	if a.cache != nil {
-		fmt.Fprintf(a.out, "Cache hits    : %d version lists, %d metadata checks\n", a.cache.versionHits.Load(), a.cache.metadataHits.Load())
+		a.ui.text("  Cache reuse: %d version lists, %d metadata checks\n", a.cache.versionHits.Load(), a.cache.metadataHits.Load())
 	}
-	fmt.Fprintf(a.out, "Elapsed       : %s\n========================================\n", elapsed.Round(time.Millisecond))
-	fmt.Fprintln(a.out, "\nPhase timings:")
+	a.ui.text("\nPhase timings\n")
 	for _, t := range a.timings {
-		fmt.Fprintf(a.out, "  %-20s %s\n", t.name, t.time.Round(time.Millisecond))
+		a.ui.text("  %-22s %s\n", t.name, humanDuration(t.time))
 	}
 	if a.opts.upgradeDeps {
-		fmt.Fprintln(a.out, "\nDependency version changes:")
+		a.ui.text("\nDependency changes\n")
 		paths := make([]string, 0, len(a.accepted.modules))
 		for path := range a.accepted.modules {
 			paths = append(paths, path)
@@ -299,19 +343,11 @@ func (a *app) summary(elapsed time.Duration) {
 			if before == "" {
 				before = "added"
 			}
-			fmt.Fprintf(a.out, "  %s: %s -> %s\n", path, before, after)
+			a.ui.text("  %s: %s -> %s\n", path, before, after)
 			changed = true
 		}
 		if !changed {
-			fmt.Fprintln(a.out, "  No dependency versions changed.")
+			a.ui.text("  No dependency versions changed.\n")
 		}
 	}
-}
-
-func tail(s string, n int) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return strings.Join(lines, "\n") + "\n"
 }
