@@ -1,8 +1,10 @@
 """Affected compilation, custom commands, and conservative acceptance checks."""
 import json
+import signal
 import subprocess
 import sys
-from fixtures import Fixture, REAL_GO
+import time
+from fixtures import Fixture, REAL_GO, SCRIPT
 
 
 with Fixture() as f:
@@ -90,6 +92,40 @@ func TestValue(t *testing.T) {{ if lib.Value()!=1 {{t.Fatal("changed behavior")}
     assert f"{behavior} v1.1.0" in (p / "go.mod").read_text(), output
     assert "Compile prechecks: 1 (0 rejected)" in output
     print("PASS matching inherited build tags apply to prechecks", flush=True)
+
+    child, parent = "example.com/introduced/child", "example.com/introduced/parent"
+    f.publish(child, "v1.0.0", "package lib\nfunc Value() int {return 1}\n")
+    f.publish(parent, "v1.0.0", "package lib\nfunc Value() int {return 1}\n")
+    f.publish(parent, "v1.1.0", f'package lib\nimport child "{child}"\nfunc Value() int {{return child.Value()}}\n', requires={child: "v1.0.0"})
+    p = f.project("precheck-introduced-transitive", [parent])
+    output, calls = f.run(p, extra_flags=["--compile-precheck"])
+    assert f"{child} v1.0.0" in (p / "go.mod").read_text(), output
+    assert f"{parent} v1.1.0" in (p / "go.mod").read_text(), output
+    assert any(a == ["build", "-o", "/dev/null", "example.com/app"] for a in calls), calls
+    print("PASS introduced transitive dependencies compile their project consumers", flush=True)
+
+    # Interrupt after a candidate graph has been applied, during its precheck.
+    p = f.project("precheck-cancellation", [behavior])
+    original = [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
+    marker = p / "waiting-for-precheck"
+    env = f.environment(p, {"WAIT_FOR_PRECHECK": str(marker)})
+    proc = subprocess.Popen([SCRIPT, "1.25.3", "--skip-tests", "--skip-vet", "--upgrade-deps", "--compile-precheck"],
+                            cwd=p, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "candidate compile precheck did not start"
+        proc.send_signal(signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=10)
+        assert proc.returncode == 143, (proc.returncode, stdout, stderr)
+        assert original == [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
+        assert "Restored original" in stderr
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            proc.communicate(timeout=10)
+    print("PASS interrupted compile prechecks restore exact original module files", flush=True)
 
     # No compiler attribution: relationship grouping still coordinates modules
     # whose newest versions must be selected together, across namespaces.
