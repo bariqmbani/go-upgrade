@@ -96,10 +96,6 @@ func (r *runner) run(dir string, stdout, stderr io.Writer, bin string, args ...s
 	return nil
 }
 
-func (r *runner) goRun(dir string, output io.Writer, args ...string) error {
-	return r.run(dir, output, output, r.goBin, args...)
-}
-
 func (r *runner) query(dir string, args ...string) (string, string, error) {
 	var out, log bytes.Buffer
 	err := r.run(dir, &out, &log, r.goBin, args...)

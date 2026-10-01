@@ -68,6 +68,18 @@ func TestProgressFitsWidthAndKeepsVersion(t *testing.T) {
 	}
 }
 
+func TestTaskAfterFallbackResetsElapsedTime(t *testing.T) {
+	var out bytes.Buffer
+	p := newPresenter(&out, &out, false)
+	p.beginMetadata(1, 1)
+	p.endProgress()
+	p.task("validating the next batch")
+	line := progressLine(p.progress, time.Now().Add(time.Second), 100)
+	if !strings.HasSuffix(line, " | 1s") {
+		t.Fatalf("stale task timer after metadata fallback: %q", line)
+	}
+}
+
 func TestPresenterConcurrentWorkers(t *testing.T) {
 	var out, errOut bytes.Buffer
 	p := newPresenter(&out, &errOut, true)

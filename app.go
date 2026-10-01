@@ -38,7 +38,11 @@ type app struct {
 func (a *app) phase(name, step string, fn func() error) error {
 	a.step = step
 	start := time.Now()
-	a.ui.beginTask(name)
+	// Discovery owns its progress so empty passes produce no extra headings.
+	showPhase := name != "Dependency discovery"
+	if showPhase {
+		a.ui.beginTask(name)
+	}
 	err := fn()
 	elapsed := time.Since(start)
 	a.ui.endProgress()
@@ -46,7 +50,9 @@ func (a *app) phase(name, step string, fn func() error) error {
 	if err != nil {
 		status = "FAIL"
 	}
-	a.ui.status(status, "%s (%s)", name, humanDuration(elapsed))
+	if showPhase {
+		a.ui.status(status, "%s (%s)", name, humanDuration(elapsed))
+	}
 	for i := range a.timings {
 		if a.timings[i].name == name {
 			a.timings[i].time += elapsed
@@ -148,19 +154,20 @@ func (a *app) run() (result error) {
 		if err := a.runGo("setting target Go version", "mod", "edit", "-go="+a.opts.target); err != nil {
 			return err
 		}
-		return a.tidy("initial module tidy")
-	}); err != nil {
-		return err
-	}
-	if a.opts.upgradeDeps {
-		if err = a.phase("Target setup", "validating target baseline", func() error {
+		if err := a.tidy("initial module tidy"); err != nil {
+			return err
+		}
+		if a.opts.upgradeDeps {
 			if err := a.validate(); err != nil {
 				return err
 			}
 			return a.acceptGraph()
-		}); err != nil {
-			return err
 		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if a.opts.upgradeDeps {
 		a.baseline = a.accepted.modules
 		a.examined = make(map[string]bool)
 		if err = a.phase("Dependency discovery", "initializing shared dependency cache", a.initializeCache); err != nil {
@@ -209,12 +216,15 @@ func (a *app) runCommand(step, bin string, args ...string) error {
 	if _, seekErr := log.Seek(0, io.SeekStart); seekErr != nil {
 		return errors.Join(err, fmt.Errorf("read command output: %w", seekErr))
 	}
-	label := step
-	if a.candidateContext != "" {
-		label += "\n  Candidates: " + a.candidateContext
-	}
-	outputErr := a.ui.commandOutput(label, commandName(bin, args...), log, err)
+	outputErr := a.ui.commandOutput(a.diagnosticLabel(step), commandName(bin, args...), log, err)
 	return errors.Join(err, outputErr)
+}
+
+func (a *app) diagnosticLabel(step string) string {
+	if a.candidateContext != "" {
+		return step + "\n  Candidates: " + a.candidateContext
+	}
+	return step
 }
 
 func (a *app) runGo(step string, args ...string) error {
@@ -224,7 +234,7 @@ func (a *app) runGo(step string, args ...string) error {
 func (a *app) queryGo(args ...string) (string, error) {
 	out, log, err := a.runner.query(a.dir, args...)
 	if err != nil {
-		outputErr := a.ui.commandOutput(a.step, commandName(a.runner.goBin, args...), strings.NewReader(log), err)
+		outputErr := a.ui.commandOutput(a.diagnosticLabel(a.step), commandName(a.runner.goBin, args...), strings.NewReader(log), err)
 		return out, errors.Join(err, outputErr)
 	}
 	a.ui.detail("%s", log)

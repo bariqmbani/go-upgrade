@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type request struct {
@@ -47,6 +49,7 @@ func (a *app) collectBatch() ([]request, error) {
 		return nil, nil
 	}
 	workers := min(a.opts.workers, len(pending))
+	started := time.Now()
 	a.ui.beginMetadata(len(pending), workers)
 	defer a.ui.endProgress()
 	type discovery struct {
@@ -108,9 +111,9 @@ func (a *app) collectBatch() ([]request, error) {
 		}
 	}
 	a.ui.endProgress()
-	a.ui.text("  Checked %d modules; selected %d upgrades\n", len(pending), len(batch))
+	a.ui.status("OK", "Checked %s; selected %s (%s)", humanCount(len(pending), "module"), humanCount(len(batch), "upgrade"), humanDuration(time.Since(started)))
 	if excluded > 0 {
-		a.ui.text("  Skipped %d candidates incompatible with Go %s or the module path\n", excluded, a.opts.target)
+		a.ui.text("  Skipped %s incompatible with Go %s or the module path\n", humanCount(excluded, "candidate"), a.opts.target)
 	}
 	if failed > 0 {
 		a.ui.status("WARN", "%d candidate metadata lookups failed; see diagnostics", failed)
@@ -184,7 +187,11 @@ func (a *app) tryUpgrade(requests []request) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
-	a.ui.diagnostic("Candidate validation failed", fmt.Sprintf("  Candidates: %s\n  Step: %s\n  Error: %v\n", a.candidateContext, a.step, err))
+	var command *commandError
+	if !errors.As(err, &command) {
+		a.ui.diagnostic("Candidate validation failed", fmt.Sprintf("  Candidates: %s\n  Step: %s\n  Error: %v\n", a.candidateContext, a.step, err))
+	}
+	a.ui.endProgress()
 	if restoreErr := a.accepted.restore(a.dir); restoreErr != nil {
 		return false, fmt.Errorf("restoring last validated graph: %w", restoreErr)
 	}
@@ -270,7 +277,7 @@ func (a *app) upgradeBatch(input []request) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	a.ui.text("  Validating dependency batch (%d modules)...\n", len(batch))
+	a.ui.text("  Validating dependency batch (%s)...\n", humanCount(len(batch), "module"))
 	ok, err := a.tryUpgrade(batch)
 	if err != nil {
 		return err
@@ -283,7 +290,7 @@ func (a *app) upgradeBatch(input []request) error {
 		for i, r := range batch {
 			requests[i] = r.String()
 		}
-		a.ui.status("OK", "Accepted batch (%d modules)", len(batch))
+		a.ui.status("OK", "Accepted batch (%s)", humanCount(len(batch), "module"))
 		a.ui.detail("  Candidates: %s\n", strings.Join(requests, " "))
 		return nil
 	}

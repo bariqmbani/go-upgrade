@@ -173,6 +173,10 @@ func (p *presenter) task(title string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.progress.metadata {
+		if p.progress.started.IsZero() {
+			now := time.Now()
+			p.progress.started, p.progress.lastLog = now, now
+		}
 		p.progress.title = title
 	}
 }
@@ -183,7 +187,7 @@ func (p *presenter) beginMetadata(total, workers int) {
 	p.clearLocked()
 	now := time.Now()
 	p.progress = progressState{title: "Checking metadata", started: now, lastLog: now, total: total, metadata: true}
-	fmt.Fprintf(p.out, "\nChecking candidates: %d modules, %d workers\n", total, workers)
+	fmt.Fprintf(p.out, "\nChecking candidates: %s, %s\n", humanCount(total, "module"), humanCount(workers, "worker"))
 }
 
 func (p *presenter) lookup(event lookupEvent) {
@@ -311,4 +315,11 @@ func humanDuration(d time.Duration) string {
 		return d.Round(time.Millisecond).String()
 	}
 	return d.Round(time.Second).String()
+}
+
+func humanCount(n int, noun string) string {
+	if n != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("%d %s", n, noun)
 }
