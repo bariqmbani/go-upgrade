@@ -30,7 +30,16 @@ timeline = os.environ.get('QUERY_TIMELINE')
 if query and timeline:
     append(timeline, ['start', time.monotonic_ns(), os.getpid(), os.getcwd()])
 if query: time.sleep(float(os.environ.get('QUERY_DELAY', '0')))
-if metadata and os.environ.get('FAIL_METADATA') == 'true':
+if args[:2] == ['list', '-deps'] and os.environ.get('PACKAGE_INSPECTION_MODE'):
+    if os.environ['PACKAGE_INSPECTION_MODE'] == 'incomplete':
+        print(json.dumps({'ImportPath': 'example.com/app', 'Name': 'main',
+                         'Module': {'Path': 'example.com/app', 'Main': True},
+                         'Incomplete': True, 'Error': {'Err': 'injected incomplete package inspection'}}))
+        status = 0
+    else:
+        print('injected package inspection failure', file=sys.stderr)
+        status = 1
+elif metadata and os.environ.get('FAIL_METADATA') == 'true':
     print('temporary metadata lookup failure', file=sys.stderr)
     if os.environ.get('LONG_DIAGNOSTICS'):
         print('METADATA-FIRST', file=sys.stderr)

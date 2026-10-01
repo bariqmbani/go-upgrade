@@ -163,7 +163,9 @@ func (a *app) checkVersions(requests []request) error {
 	return nil
 }
 
-func (a *app) tryUpgrade(requests []request) (bool, error) {
+func (a *app) tryUpgrade(requests []request) (bool, *retryGuide, error) {
+	a.failurePoints = nil
+	var packages *packageGraph
 	args := []string{"get"}
 	names := make([]string, len(requests))
 	for i, r := range requests {
@@ -183,11 +185,46 @@ func (a *app) tryUpgrade(requests []request) (bool, error) {
 		a.ui.task(a.step)
 		err = a.checkVersions(requests)
 	}
+	resolved := err == nil
+	if err == nil {
+		if a.opts.compilePrecheck {
+			a.step = "inspecting affected packages"
+			a.ui.task(a.step)
+			var inspectErr error
+			packages, inspectErr = a.inspectPackages(false)
+			if inspectErr != nil && a.ctx.Err() != nil {
+				err = a.ctx.Err()
+			} else {
+				if inspectErr != nil {
+					a.ui.detail("  Package inspection unavailable: %v\n", inspectErr)
+				}
+				err = a.compilePrecheck(packages)
+			}
+		}
+	}
 	if err == nil {
 		err = a.validate()
 	}
 	if err == nil {
-		return true, nil
+		return true, nil, nil
+	}
+	var guide *retryGuide
+	if len(requests) > 1 && resolved && a.ctx.Err() == nil {
+		step := a.step
+		a.step = "inspecting dependency relationships"
+		a.ui.task(a.step)
+		// Include test imports for failures from enabled test/vet checks.
+		if packages == nil || !a.opts.skipTests || !a.opts.skipVet {
+			var inspectErr error
+			packages, inspectErr = a.inspectPackages(!a.opts.skipTests || !a.opts.skipVet)
+			if inspectErr != nil {
+				a.ui.detail("  Retry inspection unavailable: %v\n", inspectErr)
+			}
+		}
+		if packages != nil {
+			guide = newRetryGuide(packages, a.accepted.modules, a.failurePoints, a.dir)
+		}
+		a.step = step
 	}
 	var command *commandError
 	if !errors.As(err, &command) {
@@ -195,12 +232,12 @@ func (a *app) tryUpgrade(requests []request) (bool, error) {
 	}
 	a.ui.endProgress()
 	if restoreErr := a.accepted.restore(a.dir); restoreErr != nil {
-		return false, fmt.Errorf("restoring last validated graph: %w", restoreErr)
+		return false, nil, fmt.Errorf("restoring last validated graph: %w", restoreErr)
 	}
 	if a.ctx.Err() != nil {
-		return false, a.ctx.Err()
+		return false, nil, a.ctx.Err()
 	}
-	return false, nil
+	return false, guide, nil
 }
 
 func (a *app) fallback(r request) error {
@@ -225,7 +262,7 @@ func (a *app) fallback(r request) error {
 		a.ui.endProgress()
 		a.ui.text("  Trying earlier version %s...\n", candidate)
 		a.ui.task("validating earlier candidate")
-		ok, err := a.tryUpgrade([]request{candidate})
+		ok, _, err := a.tryUpgrade([]request{candidate})
 		a.ui.endProgress()
 		if err != nil {
 			return err
@@ -242,27 +279,6 @@ func (a *app) fallback(r request) error {
 	}
 	a.ui.status("SKIP", "Retained %s@%s: no newer candidate passed validation", r.module, previous)
 	return nil
-}
-
-func family(module string) string {
-	parts := strings.Split(module, "/")
-	if len(parts) >= 2 {
-		return strings.Join(parts[:2], "/")
-	}
-	return module
-}
-
-func batchSplit(batch []request) int {
-	count := len(batch)
-	midpoint := count / 2
-	for distance := 0; distance < count; distance++ {
-		for _, boundary := range []int{midpoint - distance, midpoint + distance} {
-			if boundary > 0 && boundary < count && family(batch[boundary-1].module) != family(batch[boundary].module) {
-				return boundary
-			}
-		}
-	}
-	return midpoint
 }
 
 func (a *app) upgradeBatch(input []request) error {
@@ -282,7 +298,7 @@ func (a *app) upgradeBatch(input []request) error {
 		return nil
 	}
 	a.ui.text("  Validating dependency batch (%s)...\n", humanCount(len(batch), "module"))
-	ok, err := a.tryUpgrade(batch)
+	ok, guide, err := a.tryUpgrade(batch)
 	if err != nil {
 		return err
 	}
@@ -307,10 +323,15 @@ func (a *app) upgradeBatch(input []request) error {
 		a.ui.dependencyDone(batch[0].module)
 		return nil
 	}
-	split := batchSplit(batch)
-	a.ui.text("  Splitting into %d and %d modules\n", split, len(batch)-split)
-	if err := a.upgradeBatch(batch[:split]); err != nil {
+	left, right, reason := guide.split(batch)
+	a.ui.text("  Splitting into %d and %d modules (%s)\n", len(left), len(right), reason)
+	if guide != nil {
+		for _, r := range right {
+			a.ui.detail("  Retry focus: %s\n", r)
+		}
+	}
+	if err := a.upgradeBatch(left); err != nil {
 		return err
 	}
-	return a.upgradeBatch(batch[split:])
+	return a.upgradeBatch(right)
 }

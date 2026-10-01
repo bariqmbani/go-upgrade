@@ -30,6 +30,8 @@ with Fixture() as fixture:
     assert not any(a[0]=='get' and f'{bad}@v1.3.0' in a for a in calls)
     assert sum(a[0]=='get' and a[1:2]==[f'{bad}@v1.2.0'] for a in calls) == 1
     new_builds = sum(a==['build','./...'] for a in calls)
+    assert new_builds <= 7, (new_builds, output)
+    assert 'compiler-guided' in output, output
     print('PASS split/fallback, metadata cache, and no unrelated retries:', new_builds, 'build calls', flush=True)
 
     all_good = project('all-good', libs[:8])
@@ -37,10 +39,11 @@ with Fixture() as fixture:
     gets = [a for a in calls if a[0]=='get']
     assert len(gets)==1 and len([a for a in gets[0] if '@v' in a])==8, gets
     assert 'Accepted batch (' in output
+    assert not any(a[:2] == ['list', '-deps'] for a in calls), calls
     print('PASS all-compatible upgrades in one batch', flush=True)
 
     # A transitive upgrade from the first sibling makes the second unnecessary.
-    api='example.com/related/api'; client='example.com/related/client'
+    api='example.com/api'; client='another.example/client'
     publish(api,'v1.0.0','package lib\nfunc Value() int {return 1}\n')
     publish(api,'v1.1.0','package lib\nfunc Value() int {return 2}\n')
     publish(client,'v1.0.0',f'package lib\nimport api "{api}"\nfunc Value() int {{return api.Value()}}\n',requires={api:'v1.0.0'})
@@ -50,6 +53,28 @@ with Fixture() as fixture:
     assert any(a[0]=='get' and f'{api}@v1.1.0' in a and f'{client}@v1.1.0' in a and f'{bad}@v1.2.0' not in a for a in calls), calls
     assert f'{client} v1.1.0' in (grouped/'go.mod').read_text()
     print('PASS related modules stay together when splitting', flush=True)
+
+    # More than one independent failure still accepts unrelated candidates.
+    for path in libs[12:14]:
+        publish(path, 'v1.2.0', 'package lib\nfunc Renamed() int {return 3}\n')
+    multiple = project('multiple-failures', libs)
+    output, calls = run(multiple, refresh=True)
+    assert all(f'{path} v1.1.0' in (multiple/'go.mod').read_text() for path in libs)
+    assert 'compiler-guided' in output
+    print('PASS multiple independent compiler failures', flush=True)
+
+    # Compatibility is not monotonic: an intervening broken release must not
+    # hide a newer working candidate below an incompatible latest release.
+    holes='example.com/holes'
+    publish(holes, 'v1.0.0', 'package lib\nfunc Value() int {return 1}\n')
+    publish(holes, 'v1.1.0', 'package lib\nfunc Missing() int {return 1}\n')
+    publish(holes, 'v1.2.0', 'package lib\nfunc Value() int {return 1}\n')
+    publish(holes, 'v1.3.0', 'package lib\nfunc Missing() int {return 1}\n')
+    p = project('compatibility-holes', [holes])
+    output, calls = run(p)
+    assert f'{holes} v1.2.0' in (p/'go.mod').read_text()
+    assert not any(a[0] == 'get' and f'{holes}@v1.1.0' in a for a in calls)
+    print('PASS newest passing version across compatibility gaps', flush=True)
 
     child='example.com/new/child'; parent='example.com/new/parent'
     publish(child,'v1.0.0','package lib\nfunc Value() int {return 1}\n')

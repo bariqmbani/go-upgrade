@@ -19,6 +19,7 @@ type options struct {
 	cacheRoot, checkCommand   string
 	buildCommand              string
 	verbose                   bool
+	compilePrecheck           bool
 }
 
 var goNumber = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
@@ -63,6 +64,8 @@ func parseOptions(args []string, getenv func(string) string) (options, bool, err
 			o.refreshCache = true
 		case "--verbose":
 			o.verbose = true
+		case "--compile-precheck":
+			o.compilePrecheck = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return o, false, fmt.Errorf("unknown option: %s", arg)
@@ -80,6 +83,9 @@ func parseOptions(args []string, getenv func(string) string) (options, bool, err
 		return o, false, fmt.Errorf("invalid Go version: %s; expected 1.25 or 1.25.0", o.target)
 	}
 	o.target = normalizeGo(o.target)
+	if o.compilePrecheck && !o.upgradeDeps {
+		return o, false, fmt.Errorf("--compile-precheck requires --upgrade-deps")
+	}
 	if o.upgradeDeps {
 		if s := getenv("UPGRADE_GO_CACHE_TTL"); s != "" {
 			if !cacheSeconds.MatchString(s) {
@@ -111,13 +117,15 @@ func parseOptions(args []string, getenv func(string) string) (options, bool, err
 func usage(w io.Writer, name string) {
 	fmt.Fprintf(w, `Usage:
   %s <go-version> [--skip-tests] [--skip-vet] [--upgrade-deps] [--refresh-cache]
-      [--build-command="command"] [--verbose]
+      [--build-command="command"] [--compile-precheck] [--verbose]
 
 Options:
   --skip-tests       Skip go test and race test (vet still checks tests)
   --skip-vet         Skip go vet; build validation still runs
   --upgrade-deps     Upgrade dependencies; disabled by default
   --refresh-cache    Refresh shared version lists and compatibility metadata
+  --compile-precheck Compile affected project packages before candidate validation
+                     (requires --upgrade-deps; existing files and Go environment)
   --verbose          Show each candidate, cache source, and successful command output
   --build-command    Build command for baseline, candidates, and final validation
                      (default: go build ./...); runs via /bin/sh -c
@@ -138,5 +146,7 @@ Notes:
   Failed runs restore the original go.mod and go.sum.
   Build commands run from the module root with the local Go environment.
   Intermediate builds use --build-command unless UPGRADE_GO_CHECK_COMMAND is set.
+  Compile prechecks require matching Go flags and reusable generated files.
+  Passing prechecks still run the configured build and enabled tests/vet.
 `, filepath.Base(name))
 }

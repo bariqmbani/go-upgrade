@@ -34,6 +34,10 @@ type app struct {
 	examined           map[string]bool
 	timings            []timing
 	lookupDirs         []string
+	failurePoints      []failurePoint
+	buildAttempts      int
+	precheckAttempts   int
+	precheckRejected   int
 }
 
 func (a *app) phase(stage progressStage, name, step string, total int, fn func() error) error {
@@ -107,6 +111,9 @@ func (a *app) run() (result error) {
 	a.ui.text("Go project upgrade\n\n  Go:            %s installed -> %s target\n  Toolchain:     Local\n  Dependencies:  %s\n  Tests:         %s\n  Vet:           %s\n  Build command: %s\n", a.localGo, a.opts.target, deps, tests, vet, build)
 	if a.opts.checkCommand != "" {
 		a.ui.text("  Intermediate:  %s\n", a.opts.checkCommand)
+	}
+	if a.opts.compilePrecheck {
+		a.ui.text("  Precheck:      Compile affected packages\n")
 	}
 	a.step = "validating local Go version"
 	if !goversion.IsValid("go" + a.localGo) {
@@ -232,6 +239,12 @@ func (a *app) runCommand(step, bin string, args ...string) error {
 	if _, seekErr := log.Seek(0, io.SeekStart); seekErr != nil {
 		return errors.Join(err, fmt.Errorf("read command output: %w", seekErr))
 	}
+	if err != nil && a.candidateContext != "" {
+		a.failurePoints = readFailurePoints(log)
+		if _, seekErr := log.Seek(0, io.SeekStart); seekErr != nil {
+			return errors.Join(err, fmt.Errorf("read command output: %w", seekErr))
+		}
+	}
 	outputErr := a.ui.commandOutput(a.diagnosticLabel(step), commandName(bin, args...), log, err)
 	return errors.Join(err, outputErr)
 }
@@ -258,6 +271,7 @@ func (a *app) queryGo(args ...string) (string, error) {
 }
 
 func (a *app) build(step string, intermediate bool) error {
+	a.buildAttempts++
 	if intermediate && a.opts.checkCommand != "" {
 		return a.runCommand(step, "/bin/sh", "-c", a.opts.checkCommand)
 	}
@@ -395,6 +409,7 @@ func (a *app) summary(elapsed time.Duration) {
 	if a.cache != nil {
 		a.ui.text("  Cache reuse: %d version lists, %d metadata checks\n", a.cache.versionHits.Load(), a.cache.metadataHits.Load())
 	}
+	a.ui.text("  Build validations: %d | Compile prechecks: %d (%d rejected)\n", a.buildAttempts, a.precheckAttempts, a.precheckRejected)
 	a.ui.text("\nPhase timings\n")
 	for _, t := range a.timings {
 		a.ui.text("  %-22s %s\n", t.name, humanDuration(t.time))
