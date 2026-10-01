@@ -75,14 +75,26 @@ show a two-line footer pinned to the bottom, with one blank row above it:
 ```text
 
 Overall [####------] ~45% | Metadata 12/48 (25%)
-example.com/module@v1.8.0 | Cached (shared) | 4s
+example.com/module@v1.8.0 | Cached (shared)       | Elapsed       4s
 ```
 
 The first line shows the overall progress bar and current phase's completed/total
 count and percentage. The second shows an active dependency or check, its cache
-source when relevant, and phase elapsed time. Logs remain above the footer and in
-normal terminal scrollback. Long module paths and the bar adapt to terminal size.
-Progress refreshes at most ten times per second and clears before diagnostics.
+source when relevant, and phase elapsed time in a fixed field on the right. The
+timer updates once per second, independently of changing action labels. Log colors
+are preserved unless `NO_COLOR` is set. Logs appear in a scrollable pane
+above the footer. Mouse-wheel scrolling, Up/Down, Page Up/Page Down, and Home
+browse earlier output without moving the footer. Scrolling upward pauses automatic
+following; click **Go to bottom** or press **End** or **G** to return to the latest
+output and resume following. Progress remains visible during fast
+output and diagnostics, with only changed rows refreshed at most ten times per
+second. Long module paths and the bar adapt to terminal size.
+
+The interactive view uses a separate terminal screen and temporary disk-backed
+logs. On completion, failure, or interruption, it restores the original screen
+and prints the complete transcript once into normal terminal scrollback. During
+the run, use the application's scroll controls; native terminal scrollback is
+managed by your terminal emulator.
 
 `~` marks the overall percentage as an estimate of completed work, not remaining
 time. Enabled stages have equal weight: baseline, target setup, dependency
@@ -109,11 +121,13 @@ batches before fallback. Command failures include the command, exit code, and
 full output; candidate failures also identify the dependencies being validated.
 Diagnostics go to stderr. Successful phase results and summaries go to stdout.
 
-Redirected output, CI, `TERM=dumb`, unknown dimensions, and terminals smaller than
+Redirected output or stdin, CI, `TERM=dumb`, unknown dimensions, and terminals smaller than
 60 columns or 8 rows use plain count/percentage summaries without animation. Long
 steps report progress every ten seconds. `NO_COLOR` disables status colors while
-retaining terminal progress. The footer is removed on success, failure, or
-interruption. For detailed plain logs, capture both streams:
+retaining terminal progress. Interactive mode requires stdin and stdout on the
+same terminal. If the terminal becomes too small, the transcript is printed and
+the rest of the run uses plain output. Terminal input settings, cursor visibility,
+and mouse reporting are restored on exit. For detailed plain logs, capture both streams:
 
 ```sh
 go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --verbose > upgrade.log 2>&1
@@ -213,8 +227,9 @@ breaks and older-version fallback, test failures, new dependencies, shared-cache
 reuse, cache expiry and corruption, transient lookup failures, custom build commands,
 worker concurrency, replaced modules, interrupt rollback, and project locking.
 Presentation tests use screen models, pipes, and real pseudo terminals to check
-footer placement, the blank margin, percentages, log preservation, resizing,
-terminal fallbacks, full error output, and interrupt cleanup.
+independent footer updates, scroll anchoring, the blank margin, percentages,
+transcript replay, resizing, terminal fallbacks, full error output, keyboard input,
+and interrupt cleanup.
 The concurrency timing test injects metadata query latency to measure the worker
 pool; it is not a benchmark of a production project. Optionally set
 `UPGRADE_GO_LEGACY_SCRIPT` to a backed-up shell script to test cache sharing in

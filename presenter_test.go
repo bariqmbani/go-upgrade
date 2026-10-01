@@ -30,7 +30,7 @@ func TestPresenterRedirectedProgress(t *testing.T) {
 	}
 }
 
-func TestPresenterClearsBeforeDiagnosticsAndExit(t *testing.T) {
+func TestPresenterRetainsDiagnosticsAndRestoresScreenOnExit(t *testing.T) {
 	var combined bytes.Buffer
 	p := newPresenter(&combined, &combined, false)
 	p.terminalSize = func() (int, int, bool) { return 100, 12, true }
@@ -48,8 +48,8 @@ func TestPresenterClearsBeforeDiagnosticsAndExit(t *testing.T) {
 	if !strings.Contains(log, "[WARN] Lookup failed\nFIRST\nsecond\nthird\nfourth\nLAST\n") || p.footerHeight != 0 {
 		t.Fatalf("diagnostic or cleanup corrupted: %q", log)
 	}
-	if strings.Contains(log, "\x1b[?25") {
-		t.Fatal("presenter changes cursor visibility")
+	if !strings.Contains(log, leaveView) {
+		t.Fatal("presenter did not restore the terminal")
 	}
 }
 
@@ -76,7 +76,7 @@ func TestTaskAfterFallbackResetsElapsedTime(t *testing.T) {
 	p.endProgress()
 	p.task("validating the next batch")
 	line := progressLines(p.progress, 45, time.Now().Add(time.Second), 100)[1]
-	if !strings.HasSuffix(line, " | 1s") {
+	if !strings.HasSuffix(line, " | Elapsed       1s") {
 		t.Fatalf("stale task timer after metadata fallback: %q", line)
 	}
 }
@@ -123,6 +123,29 @@ func TestPresenterAlwaysShowsCompleteCommandFailures(t *testing.T) {
 		}
 		if strings.Contains(out.String(), "SUCCESS-OUTPUT") != verbose {
 			t.Fatalf("wrong successful transcript visibility: %q", out.String())
+		}
+	}
+}
+
+func TestElapsedFieldStaysFixedWhileActionsChange(t *testing.T) {
+	now := time.Now()
+	for _, width := range []int{59, 79, 99} {
+		s := progressState{title: "Dependencies", item: "example.com/a@v1.2.3", started: now}
+		expected := -1
+		for _, action := range []string{"updating dependencies", "go tidy", "go build", "running tests", "go vet"} {
+			s.action = action
+			line := progressLines(s, 50, now.Add(1900*time.Millisecond), width)[1]
+			column := strings.Index(line, " | Elapsed")
+			if expected < 0 {
+				expected = column
+			}
+			if column != expected || len(line) != width || !strings.HasSuffix(line, "      1s") {
+				t.Fatalf("timer moved for %q at width %d: %q", action, width, line)
+			}
+			earlier := progressLines(s, 50, now.Add(1100*time.Millisecond), width)[1]
+			if line != earlier {
+				t.Fatal("timer changed within the same second")
+			}
 		}
 	}
 }

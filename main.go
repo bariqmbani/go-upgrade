@@ -38,7 +38,7 @@ func main() {
 		case <-ctx.Done():
 		}
 	}()
-	a := &app{opts: opts, ctx: ctx, out: os.Stdout, errOut: os.Stderr}
+	a := &app{opts: opts, ctx: ctx, out: os.Stdout, errOut: os.Stderr, interrupt: func() { signalCode.Store(130); cancel() }}
 	if err := a.run(); err != nil {
 		code := errorCode(err)
 		if n := signalCode.Load(); n != 0 {

@@ -21,6 +21,7 @@ type timing struct {
 type app struct {
 	opts               options
 	ctx                context.Context
+	interrupt          func()
 	out, errOut        io.Writer
 	ui                 *presenter
 	runner             *runner
@@ -69,6 +70,7 @@ func (a *app) phase(stage progressStage, name, step string, total int, fn func()
 func (a *app) run() (result error) {
 	start := time.Now()
 	a.ui = newPresenter(a.out, a.errOut, a.opts.verbose)
+	a.ui.interrupt = a.interrupt
 	a.ui.configure(a.opts.upgradeDeps)
 	a.ui.start()
 	defer a.ui.close()

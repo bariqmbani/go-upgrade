@@ -15,6 +15,7 @@ type testScreen struct {
 	width, height, row, column int
 	cells                      [][]rune
 	history                    []string
+	saved                      *testScreen
 }
 
 func newTestScreen(width, height int) *testScreen {
@@ -39,7 +40,7 @@ func (s *testScreen) feed(data string) {
 	for len(data) > 0 {
 		if strings.HasPrefix(data, "\x1b[") {
 			end := 2
-			for end < len(data) && (data[end] >= '0' && data[end] <= '9' || data[end] == ';') {
+			for end < len(data) && (data[end] >= '0' && data[end] <= '9' || data[end] == ';' || data[end] == '?') {
 				end++
 			}
 			if end >= len(data) {
@@ -58,10 +59,23 @@ func (s *testScreen) feed(data string) {
 				s.row = min(s.height-1, max(0, value(0, 1)-1))
 				s.column = min(s.width-1, max(0, value(1, 1)-1))
 			case 'K':
-				if value(0, 0) != 2 {
-					panic("unsupported line erase")
+				start := s.column
+				if value(0, 0) == 2 {
+					start = 0
 				}
-				s.cells[s.row] = make([]rune, s.width)
+				for col := start; col < s.width; col++ {
+					s.cells[s.row][col] = 0
+				}
+			case 'h', 'l':
+				if data[2:end] == "?1049" {
+					if data[end] == 'h' {
+						old := *s
+						*s = *newTestScreen(s.width, s.height)
+						s.saved = &old
+					} else if s.saved != nil {
+						*s = *s.saved
+					}
+				}
 			case 'm': // Styling does not change screen geometry.
 			default:
 				panic("unexpected terminal control: " + data[:end+1])
@@ -101,6 +115,7 @@ func (s *testScreen) transcript() string {
 func TestFixedFooterPreservesLogsAndMargin(t *testing.T) {
 	var out bytes.Buffer
 	p := newPresenter(&out, &out, false)
+	t.Cleanup(p.close)
 	p.configure(true)
 	p.terminalSize = func() (int, int, bool) { return 100, 12, true }
 	screen := newTestScreen(100, 12)
@@ -128,12 +143,18 @@ func TestFixedFooterPreservesLogsAndMargin(t *testing.T) {
 	assertFooter()
 	for i := range 40 {
 		p.status("OK", "PERMANENT-%02d", i)
+		flush()
+		assertFooter() // Log writes must not blank the footer between ticks.
 		paint()
 		assertFooter()
 	}
 	p.diagnostic("Long error", strings.Repeat("diagnostic detail\n", 20)+"ERROR-LAST\n")
+	flush()
+	assertFooter()
 	paint()
 	assertFooter()
+	p.close()
+	flush()
 	transcript := screen.transcript()
 	for i := range 40 {
 		if !strings.Contains(transcript, fmt.Sprintf("PERMANENT-%02d", i)) {
@@ -145,7 +166,7 @@ func TestFixedFooterPreservesLogsAndMargin(t *testing.T) {
 	}
 	p.close()
 	flush()
-	if screen.line(10) != "" || screen.line(11) != "" || p.footerHeight != 0 {
+	if strings.Contains(screen.transcript(), "Overall [") || p.footerHeight != 0 {
 		t.Fatal("footer remained after exit")
 	}
 }
@@ -186,6 +207,8 @@ func TestFooterResizeAndSmallTerminalFallback(t *testing.T) {
 		t.Fatal("footer did not release on an undersized terminal")
 	}
 	out.Reset()
+	width, height = 100, 24
+	paint() // Fallback is permanent, even if the terminal becomes usable again.
 	p.text("Plain output\n")
 	if strings.Contains(out.String(), "\x1b") {
 		t.Fatalf("terminal controls in fallback output: %q", out.String())

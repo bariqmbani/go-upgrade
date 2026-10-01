@@ -17,6 +17,12 @@ import (
 // a timer paints that state without making dependency queries wait for a repaint.
 type presenter struct {
 	mu                sync.Mutex
+	outputMu          sync.Mutex
+	view              *terminalView
+	plain             bool
+	inputFile         *os.File
+	input             *terminalInput
+	interrupt         func()
 	out, errOut       io.Writer
 	verbose, color    bool
 	terminalSize      func() (int, int, bool)
@@ -28,7 +34,6 @@ type presenter struct {
 	footerHeight      int
 	lastFrame         [2]string
 	progress          progressState
-	drawn             bool
 	stop, done        chan struct{}
 	closeOnce         sync.Once
 }
@@ -44,7 +49,8 @@ type progressState struct {
 func newPresenter(out, errOut io.Writer, verbose bool) *presenter {
 	p := &presenter{out: out, errOut: errOut, verbose: verbose, work: newWorkProgress(false), errSharesTerminal: sameOutput(out, errOut)}
 	file, ok := out.(*os.File)
-	if ok && os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb" && os.Getenv("CI") == "" && term.IsTerminal(int(file.Fd())) {
+	if ok && os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb" && os.Getenv("CI") == "" && term.IsTerminal(int(file.Fd())) && term.IsTerminal(int(os.Stdin.Fd())) && sameOutput(os.Stdin, out) {
+		p.inputFile = os.Stdin
 		p.terminalSize = func() (int, int, bool) {
 			width, height, err := term.GetSize(int(file.Fd()))
 			return width, height, err == nil && width >= 60 && height >= 8
@@ -58,12 +64,25 @@ func newPresenter(out, errOut io.Writer, verbose bool) *presenter {
 
 func (p *presenter) start() {
 	p.stop, p.done = make(chan struct{}), make(chan struct{})
+	p.mu.Lock()
+	p.ensureViewLocked()
+	p.mu.Unlock()
 	go func() {
 		defer close(p.done)
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
+			p.mu.Lock()
+			var events <-chan string
+			if p.input != nil {
+				events = p.input.events
+			}
+			p.mu.Unlock()
 			select {
+			case event := <-events:
+				p.mu.Lock()
+				p.inputLocked(event)
+				p.mu.Unlock()
 			case now := <-ticker.C:
 				p.mu.Lock()
 				p.renderLocked(now)
@@ -93,9 +112,13 @@ type activeLookup struct {
 	sequence     uint64
 }
 
-func sameOutput(out, errOut io.Writer) bool {
+func sameWriter(out, errOut io.Writer) bool {
 	a, b := reflect.ValueOf(out), reflect.ValueOf(errOut)
-	if a.IsValid() && b.IsValid() && a.Comparable() && b.Comparable() && out == errOut {
+	return a.IsValid() && b.IsValid() && a.Comparable() && b.Comparable() && out == errOut
+}
+
+func sameOutput(out, errOut io.Writer) bool {
+	if sameWriter(out, errOut) {
 		return true
 	}
 	if a, ok := out.(*os.File); ok {
@@ -108,57 +131,14 @@ func sameOutput(out, errOut io.Writer) bool {
 	return false
 }
 
-// The footer uses ordinary full-screen scrolling. No scrolling region or
-// alternate screen is installed, so permanent output enters normal scrollback.
-// The cursor rests on the blank margin row between redraws. Before a log block,
-// erase the footer, append the block normally, then add two trailing newlines
-// to leave three empty rows and restore the margin-row cursor.
-func (p *presenter) clearLocked() {
-	if p.footerHeight > 0 {
-		for row := p.footerHeight - 2; row <= p.footerHeight; row++ {
-			fmt.Fprintf(p.out, "\x1b[%d;1H\x1b[2K", row)
-		}
-		fmt.Fprintf(p.out, "\x1b[%d;1H", p.footerHeight-2)
-	}
-	p.drawn = false
-}
-
-func (p *presenter) releaseFooterLocked() {
-	p.resizeLocked()
-	p.clearLocked()
-	p.footerHeight = 0
-}
-
-type outputTail struct {
-	io.Writer
-	last    byte
-	written bool
-}
-
-func (w *outputTail) Write(data []byte) (int, error) {
-	n, err := w.Writer.Write(data)
-	if n > 0 {
-		w.last, w.written = data[n-1], true
-	}
-	return n, err
-}
-
+// Callers enter and leave with mu held. Output blocks stay contiguous, but the
+// screen renderer can run between bounded writes without waiting for io.Copy.
 func (p *presenter) writeLocked(w io.Writer, fn func(io.Writer) error) error {
-	p.resizeLocked()
-	p.clearLocked()
-	terminal := p.footerHeight > 0 && (sameOutput(w, p.out) || p.errSharesTerminal && sameOutput(w, p.errOut))
-	if !terminal {
-		return fn(w)
-	}
-	tail := &outputTail{Writer: w}
-	err := fn(tail)
-	if tail.written {
-		if tail.last != '\n' {
-			fmt.Fprintln(w)
-		}
-		fmt.Fprintf(p.out, "\n\n\x1b[%d;1H", p.footerHeight-2)
-	}
-	return err
+	p.mu.Unlock()
+	defer p.mu.Lock()
+	p.outputMu.Lock()
+	defer p.outputMu.Unlock()
+	return fn(presenterOutput{p, w})
 }
 
 func (p *presenter) text(format string, args ...any) {
@@ -255,13 +235,11 @@ func (p *presenter) configure(upgradeDeps bool) {
 func (p *presenter) beginPhase(stage progressStage, title string, total int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.resizeLocked()
-	p.clearLocked()
 	p.work.begin(stage, total)
 	p.progress = progressState{}
 	p.resumeLocked()
 	if !p.interactiveLocked() {
-		fmt.Fprintf(p.out, "\n%s...\n", title)
+		p.writeLocked(p.out, func(w io.Writer) error { _, err := fmt.Fprintf(w, "\n%s...\n", title); return err })
 	}
 }
 
@@ -326,15 +304,11 @@ func (p *presenter) success() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.work.overall = 100
-	p.progress = progressState{}
-	p.releaseFooterLocked()
 }
 
 func (p *presenter) beginMetadata(total, workers int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.resizeLocked()
-	p.clearLocked()
 	p.work.begin(stageDiscovery, total)
 	p.progress = progressState{}
 	p.resumeLocked()
@@ -399,68 +373,17 @@ func (p *presenter) moduleDone(module string) {
 func (p *presenter) endProgress() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.resizeLocked()
-	p.clearLocked()
 	p.progress = progressState{}
 }
 
 func (p *presenter) interactiveLocked() bool {
-	if p.terminalSize == nil {
-		return false
-	}
-	_, _, ok := p.terminalSize()
-	return ok
-}
-
-func (p *presenter) resizeLocked() (int, int, bool) {
-	if p.terminalSize == nil {
-		return 0, 0, false
-	}
-	width, height, ok := p.terminalSize()
-	if p.footerHeight > 0 && (!ok || height != p.footerHeight) {
-		// On shrink, coordinates outside the new screen would clamp to the
-		// bottom row. Only erase old footer rows still inside the screen.
-		for row := p.footerHeight - 2; row <= min(p.footerHeight, height); row++ {
-			if row > 0 {
-				fmt.Fprintf(p.out, "\x1b[%d;1H\x1b[2K", row)
-			}
-		}
-		p.footerHeight, p.drawn = 0, false
-	}
-	return width, height, ok
+	return p.ensureViewLocked()
 }
 
 func (p *presenter) snapshotLocked() progressState {
 	s := p.progress
 	s.completed, s.total = p.work.completed, p.work.total
 	return s
-}
-
-func (p *presenter) renderLocked(now time.Time) {
-	if p.progress.title == "" {
-		return
-	}
-	s := p.snapshotLocked()
-	width, height, interactive := p.resizeLocked()
-	if !interactive {
-		if now.Sub(s.lastLog) >= 10*time.Second {
-			fmt.Fprintf(p.out, "  Overall ~%d%% | %s %d/%d (%d%%) | %s elapsed\n", p.work.overall, s.title, s.completed, s.total, phasePercent(s.completed, s.total), humanDuration(now.Sub(s.started)))
-			p.progress.lastLog = now
-		}
-		return
-	}
-	lines := progressLines(s, p.work.overall, now, width-1)
-	if p.drawn && p.lastFrame == lines {
-		return
-	}
-	if p.footerHeight == 0 {
-		// Reserve space using normal scrolling, without erasing older logs.
-		fmt.Fprint(p.out, "\n\n\n")
-		p.footerHeight = height
-	}
-	p.clearLocked()
-	fmt.Fprintf(p.out, "\x1b[%d;1H%s\x1b[%d;1H%s\x1b[%d;1H", height-1, lines[0], height, lines[1], height-2)
-	p.drawn, p.lastFrame = true, lines
 }
 
 func progressLines(s progressState, overall int, now time.Time, width int) [2]string {
@@ -472,11 +395,11 @@ func progressLines(s progressState, overall int, now time.Time, width int) [2]st
 	filled := min(barWidth, max(0, overall)*barWidth/100)
 	bar := "[" + strings.Repeat("#", filled) + strings.Repeat("-", barWidth-filled) + "]"
 	first := fmt.Sprintf("Overall %s ~%d%% | %s", bar, overall, counts)
-	suffix := " | " + humanDuration(now.Sub(s.started))
+	suffix := ""
 	if s.source != "" {
-		suffix = " | " + s.source + suffix
+		suffix = " | " + s.source
 	} else if s.item != "" && s.action != "" && s.item != s.action {
-		suffix = " | " + shortAction(s.action) + suffix
+		suffix = " | " + shortAction(s.action)
 	}
 	item := s.item
 	if item == "" {
@@ -485,8 +408,12 @@ func progressLines(s progressState, overall int, now time.Time, width int) [2]st
 			item = "Checks complete"
 		}
 	}
-	second := shortenItem(item, max(0, width-len([]rune(suffix)))) + suffix
-	return [2]string{shorten(first, width), shorten(second, width)}
+	elapsed := max(time.Duration(0), now.Sub(s.started)).Truncate(time.Second)
+	timer := fmt.Sprintf(" | Elapsed %8s", elapsed)
+	detailWidth := max(0, width-len(timer))
+	detail := shortenItem(item, max(0, detailWidth-len([]rune(suffix)))) + suffix
+	second := paddedLine(detail, detailWidth) + timer
+	return [2]string{shorten(first, width), second}
 }
 
 func shortAction(action string) string {

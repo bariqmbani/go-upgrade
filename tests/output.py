@@ -15,17 +15,21 @@ import time
 from fixtures import Fixture, SCRIPT, metadata_queries, version_queries
 
 
-def terminal_run(f, project, flags=(), extra=None, width=100, height=24, interrupt=None, resize=False):
+def terminal_run(f, project, flags=(), extra=None, width=100, height=24, interrupt=None, resize=False, scroll=False, input_tty=True, color=False):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+    original_termios = termios.tcgetattr(slave)
     env = f.environment(project, {"TERM": "xterm-256color", "CI": "", "NO_COLOR": "1", **(extra or {})})
+    if color:
+        env.pop("NO_COLOR", None)
     proc = subprocess.Popen([SCRIPT, "1.25.3", "--skip-tests", "--skip-vet", "--upgrade-deps", *flags],
-                            cwd=project, env=env, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
+                            cwd=project, env=env, stdin=slave if input_tty else subprocess.DEVNULL, stdout=slave, stderr=slave)
     os.close(slave)
     output = bytearray()
     saw_live_candidate = False
     changed_size = False
     sent_signal = False
+    scroll_step = 0
     deadline = time.monotonic() + 120
     try:
         while True:
@@ -53,12 +57,39 @@ def terminal_run(f, project, flags=(), extra=None, width=100, height=24, interru
                     # renderer may run before the metadata process even starts.
                     assert sum(e[0] == "end" for e in events) < 3, events
                 if interrupt:
-                    proc.send_signal(interrupt)
+                    if interrupt == "keyboard":
+                        os.write(master, b"\x03")
+                    else:
+                        proc.send_signal(interrupt)
                     sent_signal = True
                 if resize:
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 72, 0, 0))
                     changed_size = True
+                if scroll:
+                    os.write(master, b"\x1b[<64;2;3M")
+                    scroll_step = 1
+            if scroll_step == 1 and "Scrolled up | [Go to bottom]  End / G" in text:
+                if scroll == "click":
+                    os.write(master, f"\x1b[<0;16;{height-2}M".encode())
+                elif scroll == "key":
+                    os.write(master, b"G")
+                else:
+                    os.write(master, b"\x1b[F")
+                scroll_step = 2
         proc.wait(timeout=10)
+        assert termios.tcgetattr(master) == original_termios, "terminal input settings not restored"
+        text = output.decode(errors="replace")
+        if "\x1b[?1049h" in text:
+            assert text.count("\x1b[?1049h") == text.count("\x1b[?1049l") == 1, repr(text)
+            assert "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l" in text, repr(text)
+            replay = text.split("\x1b[?1049l", 1)[1]
+            assert replay.count("Go project upgrade") == 1, repr(replay)
+            assert "\x1b[" not in re.sub(r"\x1b\[[0-9;]*m", "", replay), repr(replay)
+        if scroll:
+            assert scroll_step == 2, "mouse scrolling did not activate the viewport"
+            # Returning to bottom must remove the scroll hint on a later frame.
+            after_hint = text.split("Scrolled up | [Go to bottom]  End / G", 1)[1]
+            assert f"\x1b[{height-2};1H" + " " * 30 in after_hint, repr(after_hint)
         return proc.returncode, output.decode(errors="replace"), saw_live_candidate, changed_size, sent_signal
     finally:
         if proc.poll() is None:
@@ -132,13 +163,34 @@ with Fixture() as f:
     }, resize=True)
     assert code == 0 and live and resized, (code, repr(output))
     assert re.search(r"\x1b\[23;1HOverall \[[#-]+\] ~\d+% \| Metadata 0/1 \(0%\)", output), repr(output)
-    assert "\x1b[24;1H" in output and "\x1b[22;1H\x1b[2K" in output, repr(output)
+    assert "\x1b[24;1H" in output and "\x1b[22;1H" in output, repr(output)
     assert "\x1b[15;1HOverall" in output and "\x1b[16;1H" in output, repr(output)
     estimates = [int(n) for n in re.findall(r"Overall \[[#-]+\] ~(\d+)%", output)]
     assert estimates and estimates == sorted(estimates) and max(estimates) <= 99, estimates
-    assert "\x1b[2K" in output and "\x1b[?25" not in output and "\x1b[32m" not in output, repr(output)
+    assert "\x1b[2K" not in output and "\x1b[?1049h" in output and "\x1b[32m" not in output, repr(output)
     assert "Upgrade complete" in output and output.endswith("\n"), repr(output)
     print("PASS fixed bottom footer, blank margin, percentages, live checks, resize, and clean completion", flush=True)
+
+    p = f.project("live-color", [library])
+    code, output, _, _, _ = terminal_run(f, p, color=True, extra={
+        "QUERY_DELAY": "0.4", "UPGRADE_GO_CACHE_DIR": str(f.root / "color-cache"),
+    })
+    live_output = output.split("\x1b[?1049l", 1)[0]
+    assert code == 0 and "\x1b[0;32m[OK]\x1b[0m" in live_output, (code, repr(live_output))
+    assert " | Elapsed " in live_output, repr(live_output)
+    print("PASS live status colors and fixed elapsed-time field", flush=True)
+
+    for control in ("end", "key", "click"):
+        p = f.project("manual-scroll-" + control, [library])
+        code, output, live, _, _ = terminal_run(f, p, width=80, height=12, scroll=control, extra={
+            "QUERY_DELAY": "0.8", "UPGRADE_GO_CACHE_DIR": str(f.root / ("scroll-cache-" + control)),
+        })
+        assert code == 0 and live, (code, repr(output))
+    print("PASS mouse scrolling and return to bottom using End, G, and clicking", flush=True)
+
+    p = f.project("no-terminal-input", [library])
+    code, output, _, _, _ = terminal_run(f, p, input_tty=False)
+    assert code == 0 and "\x1b" not in output, (code, repr(output))
 
     # Real terminals still use plain output for CI, TERM=dumb, or tiny widths.
     for label, extra, width, height in (("ci", {"CI": "true"}, 100, 24), ("dumb", {"TERM": "dumb"}, 100, 24), ("narrow", {}, 40, 24), ("short", {}, 100, 7)):
@@ -148,7 +200,7 @@ with Fixture() as f:
     print("PASS plain terminal fallbacks for CI, dumb terminals, and narrow widths", flush=True)
 
     # Both stdout and stderr go to the same real terminal. Long diagnostics must
-    # remain complete while the presenter clears and removes its footer.
+    # remain complete when the interactive transcript is replayed on exit.
     p = f.project("terminal-long-error", [library])
     originals = [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
     command = "sleep 0.3; printf 'TERMINAL-FIRST\\n'; seq 1 128; printf 'TERMINAL-LAST\\n' >&2; exit 7"
@@ -160,14 +212,14 @@ with Fixture() as f:
     assert originals == [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
     print("PASS complete long stderr/stdout diagnostics with footer cleanup and rollback", flush=True)
 
-    for sig, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
-        p = f.project("terminal-interrupt-" + str(expected), [library])
+    for sig, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143), ("keyboard", 130)):
+        p = f.project("terminal-interrupt-" + str(sig), [library])
         originals = [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
         code, output, live, _, sent = terminal_run(f, p, interrupt=sig, extra={
-            "QUERY_DELAY": "0.4", "UPGRADE_GO_CACHE_DIR": str(f.root / ("signal-cache-" + str(expected))),
+            "QUERY_DELAY": "0.4", "UPGRADE_GO_CACHE_DIR": str(f.root / ("signal-cache-" + str(sig))),
         })
         assert code == expected and live and sent, (code, repr(output))
         assert "Restored original go.mod and go.sum." in output and "Go upgrade failed" in output, repr(output)
         assert originals == [(p / name).read_bytes() for name in ("go.mod", "go.sum")]
-        assert output.endswith("\n") and "\x1b[?25" not in output, repr(output)
+        assert output.endswith("\n") and "\x1b[?1049l" in output, repr(output)
     print("PASS SIGINT/SIGTERM clear terminal progress, restore originals, and preserve exit codes", flush=True)
