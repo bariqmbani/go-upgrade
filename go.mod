@@ -1,4 +1,4 @@
-module go-upgrade
+module github.com/bariqmbani/go-upgrade
 
 go 1.27.1
 

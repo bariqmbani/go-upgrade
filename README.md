@@ -3,14 +3,50 @@
 Upgrade a Go module's declared Go version and optionally select newer dependencies
 that pass validation in that project. Built with Go 1.27.1 for Linux/Unix.
 
+## Installation
+
+Requires Go 1.27.1 or newer.
+
 ```sh
-make install
+go install github.com/bariqmbani/go-upgrade@latest
+```
+
+The binary is installed into `GOBIN` if set, otherwise the `bin` directory of
+`GOPATH` (normally `$HOME/go/bin`). Add that directory to your `PATH`. For the
+default location:
+
+```sh
+export PATH="$HOME/go/bin:$PATH"
+go-upgrade --help
+```
+
+To install directly into `~/.local/bin`:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+GOBIN="$HOME/.local/bin" go install github.com/bariqmbani/go-upgrade@latest
+```
+
+### Install from source
+
+```sh
+git clone https://github.com/bariqmbani/go-upgrade.git
+cd go-upgrade
+go install .
+```
+
+Alternatively, `make install` backs up existing commands and installs
+`go-upgrade` plus the `upgrade-go` alias into `~/.local/bin`. This method also
+requires `make` and Python 3. `go install` installs only `go-upgrade`.
+
+## Usage
+
+```sh
 go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps
 go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --build-command="make clean build"
 ```
 
-`upgrade-go` remains available as an alias. The installed local
-Go must be at least the requested target. Every subprocess uses
+The installed local Go must be at least the requested target. Every subprocess uses
 `GOWORK=off GOTOOLCHAIN=local`; the command never downloads a target toolchain.
 
 ## Flags
