@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	opts, help, err := parseOptions(os.Args[0], os.Args[1:], os.Getenv)
+	opts, help, err := parseOptions(os.Args[1:], os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		usage(os.Stderr, os.Args[0])

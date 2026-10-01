@@ -14,10 +14,10 @@ type options struct {
 	target                    string
 	skipTests, skipVet        bool
 	upgradeDeps, refreshCache bool
-	nds                       bool
 	workers                   int
 	cacheTTL                  time.Duration
 	cacheRoot, checkCommand   string
+	buildCommand              string
 }
 
 var goNumber = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
@@ -31,9 +31,24 @@ func normalizeGo(v string) string {
 	return v
 }
 
-func parseOptions(name string, args []string, getenv func(string) string) (options, bool, error) {
-	o := options{nds: strings.HasSuffix(filepath.Base(name), "-nds"), workers: 4, cacheTTL: 24 * time.Hour}
-	for _, arg := range args {
+func parseOptions(args []string, getenv func(string) string) (options, bool, error) {
+	o := options{workers: 4, cacheTTL: 24 * time.Hour}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if flag, value, equals := strings.Cut(arg, "="); flag == "--build-command" {
+			if !equals {
+				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+					return o, false, fmt.Errorf("--build-command requires a command")
+				}
+				i++
+				value = args[i]
+			}
+			if strings.TrimSpace(value) == "" {
+				return o, false, fmt.Errorf("--build-command requires a nonempty command")
+			}
+			o.buildCommand = value
+			continue
+		}
 		switch arg {
 		case "-h", "--help":
 			return o, true, nil
@@ -93,12 +108,15 @@ func parseOptions(name string, args []string, getenv func(string) string) (optio
 func usage(w io.Writer, name string) {
 	fmt.Fprintf(w, `Usage:
   %s <go-version> [--skip-tests] [--skip-vet] [--upgrade-deps] [--refresh-cache]
+      [--build-command="command"]
 
 Options:
   --skip-tests       Skip go test and race test (vet still checks tests)
   --skip-vet         Skip go vet; build validation still runs
   --upgrade-deps     Upgrade dependencies; disabled by default
   --refresh-cache    Refresh shared version lists and compatibility metadata
+  --build-command    Build command for baseline, candidates, and final validation
+                     (default: go build ./...); runs via /bin/sh -c
   -h, --help         Show this help
 
 Environment:
@@ -114,7 +132,7 @@ Notes:
   Cached metadata does not replace project build/test validation.
   Major module-path migrations are not automatic; replaced modules are skipped.
   Failed runs restore the original go.mod and go.sum.
-  The -nds command uses make clean build for baseline and final validation.
-  Intermediate builds use the same command unless UPGRADE_GO_CHECK_COMMAND is set.
+  Build commands run from the module root with the local Go environment.
+  Intermediate builds use --build-command unless UPGRADE_GO_CHECK_COMMAND is set.
 `, filepath.Base(name))
 }

@@ -112,11 +112,12 @@ class Fixture:
         env.update(extra or {})
         return env
 
-    def run(self, p, script=SCRIPT, enabled_tests=False, upgrade=True, expect=0, target="1.25.3", refresh=False, extra_env=None):
+    def run(self, p, script=SCRIPT, enabled_tests=False, upgrade=True, expect=0, target="1.25.3", refresh=False, extra_env=None, extra_flags=None):
         env = self.environment(p, extra_env)
         flags = ["--skip-vet"] + ([] if enabled_tests else ["--skip-tests"]) + (["--upgrade-deps"] if upgrade else [])
         if refresh:
             flags.append("--refresh-cache")
+        flags.extend(extra_flags or [])
         result = subprocess.run([script, target, *flags], cwd=p, env=env, capture_output=True, text=True, timeout=180)
         (p / "output.log").write_text(result.stdout + result.stderr)
         assert result.returncode == expect, (result.returncode, result.stdout, result.stderr)

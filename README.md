@@ -6,10 +6,10 @@ that pass validation in that project. Built with Go 1.27.1 for Linux/Unix.
 ```sh
 make install
 go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps
-go-upgrade-nds 1.25.3 --skip-tests --skip-vet --upgrade-deps
+go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --build-command="make clean build"
 ```
 
-`upgrade-go` and `upgrade-go-nds` remain available as aliases. The installed local
+`upgrade-go` remains available as an alias. The installed local
 Go must be at least the requested target. Every subprocess uses
 `GOWORK=off GOTOOLCHAIN=local`; the command never downloads a target toolchain.
 
@@ -21,6 +21,7 @@ Go must be at least the requested target. Every subprocess uses
 | `--skip-vet` | Skip vet, while keeping build validation |
 | `--upgrade-deps` | Enable dependency upgrades; off by default |
 | `--refresh-cache` | Refresh version catalogs and dependency metadata |
+| `--build-command="command"` | Customize builds; default: `go build ./...` |
 | `-h`, `--help` | Show usage |
 
 Run from a module root. Targets accept `1.25`, `1.25.3`, or `go1.25.3`.
@@ -39,18 +40,22 @@ in batches. A failing batch is split, and a failing individual dependency falls
 back through older releases. Existing dependencies are not downgraded. Newly
 introduced dependencies get another discovery pass.
 
-The default build is `go build ./...`. The `-nds` command uses `make clean build`
-for every build by default. The same binary handles both modes by command name.
+The default build is `go build ./...`. Set `--build-command="make clean build"`
+or `--build-command "make clean build"` to customize baseline, candidate, and final
+build validation. The command runs via `/bin/sh -c` from the module root with
+`GOWORK=off GOTOOLCHAIN=local`. Shell quoting, environment assignments, and command
+chaining are supported.
+
 For a Makefile whose preparation is done by `setup` and `protoc`, intermediate
 validation can optionally reuse the files created by the baseline build:
 
 ```sh
 UPGRADE_GO_CHECK_COMMAND='make -o setup -o protoc build' \
-  go-upgrade-nds 1.25.3 --skip-tests --skip-vet --upgrade-deps
+  go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --build-command="make clean build"
 ```
 
 Only set this command if it performs equivalent compilation for your project.
-Baseline and final validation still use the full default build. All enabled
+Baseline and final validation use `--build-command` or the default build. All enabled
 tests and vet checks still run for intermediate candidates.
 
 The success summary includes phase timings. Metadata checks establish module
@@ -93,7 +98,7 @@ make build
 
 Integration tests use real modules from a temporary file proxy. They cover API
 breaks and older-version fallback, test failures, new dependencies, shared-cache
-reuse, cache expiry and corruption, transient lookup failures, NDS routing,
+reuse, cache expiry and corruption, transient lookup failures, custom build commands,
 worker concurrency, replaced modules, interrupt rollback, and project locking.
 The concurrency timing test injects metadata query latency to measure the worker
 pool; it is not a benchmark of a production project. Optionally set

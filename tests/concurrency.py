@@ -79,29 +79,6 @@ with Fixture() as f:
         assert not version_queries(calls) and not metadata_queries(calls)
         print("PASS bidirectional cache sharing with backed-up shell script", flush=True)
 
-    # NDS routing always uses full make builds unless explicitly configured otherwise.
-    make = f.wrapper_dir / "make"
-    make.write_text('''#!/usr/bin/env python3
-import json, os, subprocess, sys
-assert sys.argv[1:] == ['clean', 'build']
-assert os.environ['GOTOOLCHAIN'] == 'local' and os.environ['GOWORK'] == 'off'
-with open(os.environ['MAKE_TRACE'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
-sys.exit(subprocess.run(['go','build','./...']).returncode)
-''')
-    make.chmod(0o755)
-    nds = f.root / "go-upgrade-nds"
-    nds.symlink_to(SCRIPT)
-    for custom in (False, True):
-        p = f.project(f"nds-{custom}", libraries[:1])
-        trace = p / "make.jsonl"
-        output, calls = f.run(p, script=str(nds), extra_env={
-            "MAKE_TRACE": str(trace), "UPGRADE_GO_CHECK_COMMAND": "go build ./..." if custom else "",
-        })
-        makes = [json.loads(s) for s in trace.read_text().splitlines()]
-        assert len(makes) == (2 if custom else 4), makes
-        assert libraries[0] + " v1.1.0" in (p / "go.mod").read_text()
-    print("PASS NDS full baseline/final builds and optional intermediate command", flush=True)
-
     # A too-old local compiler fails before builds, metadata queries, or module changes.
     p = f.project("local-too-old", libraries[:1])
     original = [(p / name).read_bytes() for name in ("go.mod", "go.sum")]

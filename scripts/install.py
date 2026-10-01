@@ -11,7 +11,7 @@ import tempfile
 project = Path(__file__).resolve().parent.parent
 destination = Path(os.environ.get("UPGRADE_GO_INSTALL_DIR", str(Path.home() / ".local/bin"))).expanduser()
 destination.mkdir(parents=True, exist_ok=True)
-names = ("go-upgrade", "go-upgrade-nds", "upgrade-go", "upgrade-go-nds")
+names = ("go-upgrade", "upgrade-go")
 existing = [name for name in names if (destination / name).exists()]
 if existing:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")

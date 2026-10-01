@@ -67,6 +67,9 @@ func (a *app) run() (result error) {
 	a.localGo = normalizeGo(local)
 	fmt.Fprintln(a.out, "========================================\nGo project upgrade\n========================================")
 	fmt.Fprintf(a.out, "Local Go     : %s\nTarget Go    : %s\nToolchain    : local\nSkip tests   : %t\nSkip vet     : %t\nUpgrade deps : %t\n\n", a.localGo, a.opts.target, a.opts.skipTests, a.opts.skipVet, a.opts.upgradeDeps)
+	if a.opts.buildCommand != "" {
+		fmt.Fprintf(a.out, "Build command: %s\n\n", a.opts.buildCommand)
+	}
 	a.step = "validating local Go version"
 	if !goversion.IsValid("go" + a.localGo) {
 		return fmt.Errorf("cannot determine a release version from local Go %q", local)
@@ -173,8 +176,8 @@ func (a *app) build(output io.Writer, intermediate bool) error {
 	if intermediate && a.opts.checkCommand != "" {
 		return a.runner.run(a.dir, output, output, "/bin/sh", "-c", a.opts.checkCommand)
 	}
-	if a.opts.nds {
-		return a.runner.run(a.dir, output, output, "make", "clean", "build")
+	if a.opts.buildCommand != "" {
+		return a.runner.run(a.dir, output, output, "/bin/sh", "-c", a.opts.buildCommand)
 	}
 	return a.runner.goRun(a.dir, output, "build", "./...")
 }
