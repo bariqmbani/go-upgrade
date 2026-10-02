@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 )
 
@@ -53,7 +52,7 @@ func decodePackages(out string) (*packageGraph, error) {
 			continue
 		}
 		// Test variants share a package identity. Retain all their imports for
-		// retry hints; production prechecks never request test variants.
+		// retry hints.
 		if previous := g.packages[p.ImportPath]; previous != nil {
 			previous.Imports = append(previous.Imports, p.Imports...)
 		} else {
@@ -115,58 +114,4 @@ func (g *packageGraph) changedModules(before map[string]string) map[string]bool 
 		}
 	}
 	return changed
-}
-
-// Select project consumers, including consumers of transitive changes. Building
-// these roots also compiles the affected dependency packages they import.
-func (g *packageGraph) affectedPackages(before map[string]string) []string {
-	changed := g.changedModules(before)
-	reverse := make(map[string][]string)
-	var queue []string
-	seen := make(map[string]bool)
-	for path, p := range g.packages {
-		for _, dependency := range p.Imports {
-			reverse[dependency] = append(reverse[dependency], path)
-		}
-		if p.Module != nil && changed[p.Module.Path] {
-			seen[path] = true
-			queue = append(queue, path)
-		}
-	}
-	for i := 0; i < len(queue); i++ {
-		for _, path := range reverse[queue[i]] {
-			if !seen[path] {
-				seen[path] = true
-				queue = append(queue, path)
-			}
-		}
-	}
-	var roots []string
-	for path := range seen {
-		if p := g.packages[path]; p.Module != nil && p.Module.Main {
-			roots = append(roots, path)
-		}
-	}
-	sort.Strings(roots)
-	return roots
-}
-
-func (a *app) compilePrecheck(g *packageGraph) error {
-	if g == nil || g.incomplete {
-		a.ui.status("WARN", "Compile precheck unavailable; using configured validation")
-		return nil
-	}
-	packages := g.affectedPackages(a.accepted.modules)
-	if len(packages) == 0 {
-		a.ui.detail("  Compile precheck skipped: no affected production packages\n")
-		return nil
-	}
-	a.precheckAttempts++
-	a.ui.detail("  Compile precheck: %s\n", strings.Join(packages, ", "))
-	args := append([]string{"build", "-o", "/dev/null"}, packages...)
-	err := a.runGo("compile precheck ("+humanCount(len(packages), "package")+")", args...)
-	if err != nil {
-		a.precheckRejected++
-	}
-	return err
 }

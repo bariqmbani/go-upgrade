@@ -20,9 +20,9 @@ and failed runs restore the original `go.mod` and `go.sum`.
 
 The project began as a shell script and evolved into a Go CLI as repeated upgrades
 needed better performance and clearer feedback. Concurrent metadata lookup,
-shared metadata caching, dependency-aware retries, and optional compile prechecks
-help reduce repeated work. Progress and complete failure diagnostics make long
-upgrade runs easier to follow while retaining the configured validation checks.
+shared metadata caching and dependency-aware retries help reduce repeated work.
+Progress and complete failure diagnostics make long upgrade runs easier to follow
+while retaining the configured validation checks.
 
 ## Installation
 
@@ -78,7 +78,6 @@ The installed local Go must be at least the requested target. Every subprocess u
 | `--skip-vet` | Skip vet, while keeping build validation |
 | `--upgrade-deps` | Enable dependency upgrades; off by default |
 | `--refresh-cache` | Refresh version catalogs and dependency metadata |
-| `--compile-precheck` | Compile affected project packages before candidate validation; requires `--upgrade-deps` |
 | `--verbose` | Show each candidate, cache source, and successful command output |
 | `--build-command="command"` | Customize builds; default: `go build ./...` |
 | `-h`, `--help` | Show usage |
@@ -169,8 +168,8 @@ references help separate implicated candidates from the remaining upgrades.
 Both groups still undergo validation. Inconclusive errors use balanced splitting;
 a failing individual dependency falls back through releases from newest to oldest.
 Existing dependencies are not downgraded. Newly introduced dependencies get
-another discovery pass. Successful batches need no additional package inspection
-unless compile prechecks are enabled.
+another discovery pass. Package inspection runs only after failed batch validation
+to guide retries. Successful batches need no additional package inspection.
 
 The default build is `go build ./...`. Set `--build-command="make clean build"`
 or `--build-command "make clean build"` to customize baseline, candidate, and final
@@ -190,36 +189,13 @@ Only set this command if it performs equivalent compilation for your project.
 Baseline and final validation use `--build-command` or the default build. All enabled
 tests and vet checks still run for intermediate candidates.
 
-### Optional compile prechecks
+The retry regression fixture with sixteen dependencies and one incompatible
+candidate uses seven build validations, compared with thirteen before smarter
+retries. This measures build invocation counts; elapsed time depends on the
+project and its build command.
 
-For expensive intermediate commands, add `--compile-precheck` to reject broken
-candidates before running that command:
-
-```sh
-UPGRADE_GO_CHECK_COMMAND='make -o setup -o protoc build' \
-  go-upgrade 1.25.3 --skip-tests --skip-vet --upgrade-deps --compile-precheck \
-  --build-command="make clean build"
-```
-
-After dependency resolution and target-constrained tidy, the precheck identifies
-changed modules, including transitive changes, and compiles their affected project
-consumers. It uses the installed Go and inherited `GOFLAGS`, `GOOS`, `GOARCH`, and
-cgo settings, reuses existing generated files, and discards build outputs.
-Unrelated project packages are excluded. Incomplete package inspection falls back
-to configured validation; updates affecting only tests have no production precheck.
-Enabled tests and vet still validate those updates.
-
-Enable this option when the Go environment matches your intermediate command and
-generated files can be reused across candidate versions. For example, if your
-Makefile adds `-tags=custom`, also set `GOFLAGS='-tags=custom'` for the precheck.
-Passing prechecks still run the configured intermediate build and every enabled
-check. Baseline and complete final validation continue using your selected build
-command. Prechecks are off by default: with an inexpensive `go build ./...`, the
-additional package inspection and Go invocation may cost more than they save.
-
-The success summary includes phase timings and separate build validation and
-compile precheck counts. Metadata checks establish module
-path and declared minimum Go compatibility. Project builds and enabled checks
+The success summary includes phase timings and build validation counts.
+Metadata checks establish module path and declared minimum Go compatibility. Project builds and enabled checks
 establish compatibility with the code exercised by those checks; they cannot
 prove the absence of every behavior change. A newer local compiler does not
 prove compilation with the exact target compiler.

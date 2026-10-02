@@ -36,8 +36,6 @@ type app struct {
 	lookupDirs         []string
 	failurePoints      []failurePoint
 	buildAttempts      int
-	precheckAttempts   int
-	precheckRejected   int
 }
 
 func (a *app) phase(stage progressStage, name, step string, total int, fn func() error) error {
@@ -111,9 +109,6 @@ func (a *app) run() (result error) {
 	a.ui.text("Go project upgrade\n\n  Go:            %s installed -> %s target\n  Toolchain:     Local\n  Dependencies:  %s\n  Tests:         %s\n  Vet:           %s\n  Build command: %s\n", a.localGo, a.opts.target, deps, tests, vet, build)
 	if a.opts.checkCommand != "" {
 		a.ui.text("  Intermediate:  %s\n", a.opts.checkCommand)
-	}
-	if a.opts.compilePrecheck {
-		a.ui.text("  Precheck:      Compile affected packages\n")
 	}
 	a.step = "validating local Go version"
 	if !goversion.IsValid("go" + a.localGo) {
@@ -409,7 +404,7 @@ func (a *app) summary(elapsed time.Duration) {
 	if a.cache != nil {
 		a.ui.text("  Cache reuse: %d version lists, %d metadata checks\n", a.cache.versionHits.Load(), a.cache.metadataHits.Load())
 	}
-	a.ui.text("  Build validations: %d | Compile prechecks: %d (%d rejected)\n", a.buildAttempts, a.precheckAttempts, a.precheckRejected)
+	a.ui.text("  Build validations: %d\n", a.buildAttempts)
 	a.ui.text("\nPhase timings\n")
 	for _, t := range a.timings {
 		a.ui.text("  %-22s %s\n", t.name, humanDuration(t.time))

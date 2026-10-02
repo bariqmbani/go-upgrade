@@ -9,11 +9,11 @@ func TestOptionsCompatibility(t *testing.T) {
 	getenv := func(key string) string {
 		return map[string]string{"HOME": "/home/test", "UPGRADE_GO_CACHE_TTL": "00060", "UPGRADE_GO_WORKERS": "8"}[key]
 	}
-	o, help, err := parseOptions([]string{"--skip-tests", "go1.25", "--upgrade-deps", "--refresh-cache", "--skip-vet", "--verbose", "--compile-precheck"}, getenv)
+	o, help, err := parseOptions([]string{"--skip-tests", "go1.25", "--upgrade-deps", "--refresh-cache", "--skip-vet", "--verbose"}, getenv)
 	if err != nil || help {
 		t.Fatalf("parse: %v, help=%t", err, help)
 	}
-	if o.target != "1.25.0" || !o.skipTests || !o.skipVet || !o.upgradeDeps || !o.refreshCache || !o.verbose || !o.compilePrecheck {
+	if o.target != "1.25.0" || !o.skipTests || !o.skipVet || !o.upgradeDeps || !o.refreshCache || !o.verbose {
 		t.Fatalf("legacy flags lost: %+v", o)
 	}
 	if o.cacheRoot != "/home/test/.cache/upgrade-go" || o.cacheTTL != time.Minute || o.workers != 8 {
@@ -22,7 +22,7 @@ func TestOptionsCompatibility(t *testing.T) {
 }
 
 func TestOptionsRejectInvalidInput(t *testing.T) {
-	for _, args := range [][]string{nil, {"1.25", "1.26"}, {"1.25rc1"}, {"1.25", "--keep-dep=example.com/lib"}, {"1.25", "--compile-precheck"}, {"--unknown"}} {
+	for _, args := range [][]string{nil, {"1.25", "1.26"}, {"1.25rc1"}, {"1.25", "--keep-dep=example.com/lib"}, {"1.25", "--upgrade-deps", "--compile-precheck"}, {"--unknown"}} {
 		if _, _, err := parseOptions(args, func(string) string { return "" }); err == nil {
 			t.Errorf("accepted invalid arguments: %v", args)
 		}

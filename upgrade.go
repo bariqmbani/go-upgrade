@@ -165,7 +165,6 @@ func (a *app) checkVersions(requests []request) error {
 
 func (a *app) tryUpgrade(requests []request) (bool, *retryGuide, error) {
 	a.failurePoints = nil
-	var packages *packageGraph
 	args := []string{"get"}
 	names := make([]string, len(requests))
 	for i, r := range requests {
@@ -187,22 +186,6 @@ func (a *app) tryUpgrade(requests []request) (bool, *retryGuide, error) {
 	}
 	resolved := err == nil
 	if err == nil {
-		if a.opts.compilePrecheck {
-			a.step = "inspecting affected packages"
-			a.ui.task(a.step)
-			var inspectErr error
-			packages, inspectErr = a.inspectPackages(false)
-			if inspectErr != nil && a.ctx.Err() != nil {
-				err = a.ctx.Err()
-			} else {
-				if inspectErr != nil {
-					a.ui.detail("  Package inspection unavailable: %v\n", inspectErr)
-				}
-				err = a.compilePrecheck(packages)
-			}
-		}
-	}
-	if err == nil {
 		err = a.validate()
 	}
 	if err == nil {
@@ -214,14 +197,12 @@ func (a *app) tryUpgrade(requests []request) (bool, *retryGuide, error) {
 		a.step = "inspecting dependency relationships"
 		a.ui.task(a.step)
 		// Include test imports for failures from enabled test/vet checks.
-		if packages == nil || !a.opts.skipTests || !a.opts.skipVet {
-			var inspectErr error
-			packages, inspectErr = a.inspectPackages(!a.opts.skipTests || !a.opts.skipVet)
-			if inspectErr != nil {
-				a.ui.detail("  Retry inspection unavailable: %v\n", inspectErr)
-			}
-		}
-		if packages != nil {
+		packages, inspectErr := a.inspectPackages(!a.opts.skipTests || !a.opts.skipVet)
+		if inspectErr != nil {
+			a.ui.detail("  Retry inspection unavailable: %v\n", inspectErr)
+		} else if packages.incomplete {
+			a.ui.detail("  Incomplete package relationships; using balanced retries\n")
+		} else {
 			guide = newRetryGuide(packages, a.accepted.modules, a.failurePoints, a.dir)
 		}
 		a.step = step

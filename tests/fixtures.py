@@ -63,9 +63,6 @@ else:
 if args[:1] == ['get'] and status == 0 and os.environ.get('WAIT_FOR_GET'):
     with open(os.environ['WAIT_FOR_GET'], 'w') as f: f.write('ready')
     time.sleep(60)
-if args[:3] == ['build','-o','/dev/null'] and args[-1] != './...' and status == 0 and os.environ.get('WAIT_FOR_PRECHECK'):
-    with open(os.environ['WAIT_FOR_PRECHECK'], 'w') as f: f.write('ready')
-    time.sleep(60)
 if query and timeline:
     append(timeline, ['end', time.monotonic_ns(), os.getpid(), os.getcwd()])
 sys.exit(status)

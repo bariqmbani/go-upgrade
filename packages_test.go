@@ -6,32 +6,6 @@ import (
 	"testing"
 )
 
-func TestAffectedPackagesIncludesTransitiveConsumers(t *testing.T) {
-	g, err := decodePackages(`
-{"ImportPath":"remote.example/core","Name":"core","Module":{"Path":"remote.example/core","Version":"v1.1.0"}}
-{"ImportPath":"remote.example/wrapper","Name":"wrapper","Imports":["remote.example/core"],"Module":{"Path":"remote.example/wrapper","Version":"v1.0.0"}}
-{"ImportPath":"example.com/app/service","Name":"service","Imports":["remote.example/wrapper"],"Module":{"Path":"example.com/app","Main":true}}
-{"ImportPath":"example.com/app/cmd","Name":"main","Imports":["example.com/app/service"],"Module":{"Path":"example.com/app","Main":true}}
-{"ImportPath":"example.com/app/independent","Name":"independent","Module":{"Path":"example.com/app","Main":true}}
-`)
-	if err != nil || g.incomplete {
-		t.Fatalf("package inspection: %v, %+v", err, g)
-	}
-	before := map[string]string{"remote.example/core": "v1.0.0", "remote.example/wrapper": "v1.0.0"}
-	want := []string{"example.com/app/cmd", "example.com/app/service"}
-	if got := g.affectedPackages(before); !reflect.DeepEqual(got, want) {
-		t.Fatalf("affected consumers: %v, want %v", got, want)
-	}
-	before["remote.example/core"] = "v1.1.0"
-	if got := g.affectedPackages(before); len(got) != 0 {
-		t.Fatalf("unchanged graph needs no precheck: %v", got)
-	}
-	delete(before, "remote.example/core")
-	if got := g.affectedPackages(before); !reflect.DeepEqual(got, want) {
-		t.Fatalf("introduced dependency consumers: %v", got)
-	}
-}
-
 func TestInspectionCompletenessAndTestVariants(t *testing.T) {
 	for _, input := range []string{
 		`{"ImportPath":"root","Imports":["missing"]}`,
