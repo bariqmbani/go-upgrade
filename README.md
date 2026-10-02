@@ -3,6 +3,27 @@
 Upgrade a Go module's declared Go version and optionally select newer dependencies
 that pass validation in that project. Built with Go 1.27.1 for Linux/Unix.
 
+## Why this project exists
+
+Upgrading Go across multiple services involved the same manual cycle: change
+`go.mod`, tidy the module, update dependencies, build the project, and investigate
+failures. Updating everything to the latest release could introduce incompatible
+APIs or conflicts between libraries, drivers, and wrappers. A dependency's
+declared Go version alone could not establish compatibility with the project.
+
+`go-upgrade` was created to automate that cycle. It uses the installed Go compiler,
+sets the requested module Go version, and makes dependency upgrades optional.
+When upgrades are enabled, it tries newer dependency versions in batches and
+falls back to earlier releases when project validation fails, reducing manual
+version selection. Custom build commands support existing project workflows,
+and failed runs restore the original `go.mod` and `go.sum`.
+
+The project began as a shell script and evolved into a Go CLI as repeated upgrades
+needed better performance and clearer feedback. Concurrent metadata lookup,
+shared metadata caching, dependency-aware retries, and optional compile prechecks
+help reduce repeated work. Progress and complete failure diagnostics make long
+upgrade runs easier to follow while retaining the configured validation checks.
+
 ## Installation
 
 Requires Go 1.27.1 or newer.
